@@ -334,6 +334,33 @@ export async function getAnonymousToken(): Promise<TokensData> {
   return tokens;
 }
 
+/**
+ * Anonymous access tokens are minted per process, not per request: AH returns a
+ * brand-new token on every mint, and re-minting per call threw away the cache
+ * scope and added an extra round-trip to every upstream fetch.
+ */
+let anonymousTokenCache: { accessToken: string; expiresAt: number } | null = null;
+
+export function clearAnonymousTokenCache(): void {
+  anonymousTokenCache = null;
+}
+
+async function getCachedAnonymousToken(): Promise<string> {
+  const now = Date.now();
+  if (anonymousTokenCache && anonymousTokenCache.expiresAt > now) {
+    return anonymousTokenCache.accessToken;
+  }
+
+  const anon = await getAnonymousToken();
+  const lifetimeMs = Math.max(0, (anon.expires_in ?? 3600) * 1000);
+  // Renew a minute early so a request never starts with a dying token.
+  anonymousTokenCache = {
+    accessToken: anon.access_token,
+    expiresAt: now + Math.max(0, lifetimeMs - 60_000),
+  };
+  return anon.access_token;
+}
+
 export async function getValidAccessToken(): Promise<string> {
   const tokens = loadTokens();
   let accessToken = tokens?.access_token;
@@ -341,8 +368,7 @@ export async function getValidAccessToken(): Promise<string> {
 
   if (!accessToken && !refreshToken) {
     // If no user session is available, fallback to an anonymous token for search/browsing
-    const anon = await getAnonymousToken();
-    return anon.access_token;
+    return getCachedAnonymousToken();
   }
 
   let shouldRefresh = false;
@@ -368,13 +394,12 @@ export async function getValidAccessToken(): Promise<string> {
     } catch {
       // If refresh failed and we have an existing token, attempt using it or fallback to anon
       if (!accessToken) {
-        const anon = await getAnonymousToken();
-        return anon.access_token;
+        return getCachedAnonymousToken();
       }
     }
   }
 
-  return accessToken || (await getAnonymousToken()).access_token;
+  return accessToken || (await getCachedAnonymousToken());
 }
 
 let stealthConfigured = false;

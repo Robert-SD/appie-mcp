@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { TtlCache, cacheKey, stableStringify } from "../src/cache.js";
+import { TtlCache, cacheKey, stableStringify, resetSharedCache } from "../src/cache.js";
 import { AhClient, CACHE_TTL } from "../src/client.js";
-import { saveTokens } from "../src/auth.js";
+import { saveTokens, clearAnonymousTokenCache } from "../src/auth.js";
 
 describe("cache.ts - TtlCache", () => {
   it("stores a value and returns it before the TTL expires", () => {
@@ -165,6 +165,10 @@ describe("client.ts - response cache", () => {
       saved_at: new Date().toISOString(),
     });
 
+    // The cache is process-wide, so every case starts from a clean one.
+    resetSharedCache();
+    clearAnonymousTokenCache();
+
     globalThis.fetch = async (input: any, init: any) => {
       const url = String(input);
       calls.push(url);
@@ -213,6 +217,9 @@ describe("client.ts - response cache", () => {
       delete process.env.APPIE_MCP_CACHE;
     }
     globalThis.fetch = originalFetch;
+
+    resetSharedCache();
+    clearAnonymousTokenCache();
 
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -335,6 +342,8 @@ describe("client.ts - response cache", () => {
 
   it("bypasses the cache entirely when APPIE_MCP_CACHE is off", async () => {
     process.env.APPIE_MCP_CACHE = "off";
+    // The shared instance is built from the environment on first use.
+    resetSharedCache();
     const client = new AhClient("https://api.ah.nl");
 
     await client.getProduct("wi196825");
