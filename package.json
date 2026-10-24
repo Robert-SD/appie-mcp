@@ -1,6 +1,6 @@
 {
   "name": "appie-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Model Context Protocol (MCP) server for Albert Heijn (Appie) - Digital receipts, shopping list, bonus deals, and grocery management",
   "main": "dist/index.js",
   "bin": {

@@ -1,3 +1,36 @@
+# Release Notes: appie-mcp v0.3.1
+
+A correctness release for the v0.3.0 response cache, which was inert in
+practice: `ah_cache_stats` always answered all zeros, repeated searches were
+never served from the cache, and each request cost an extra anonymous-token
+round trip.
+
+---
+
+## 🔧 Fixes in v0.3.1
+
+- **The cache now survives the session that fills it.** `AhClient` builds its
+  cache from a process-wide singleton (`getSharedCache()`) instead of a private
+  instance per client, so a deployment that constructs a client per request
+  still shares one warm cache. A per-request instance was born empty on every
+  tool call, which is why every counter read zero immediately after a search.
+- **An anonymous session no longer flushes the cache on every call.** Cache
+  entries were scoped by a digest of the bearer token, and anonymous browsing
+  mints a new token per request — so the scope changed, the cache was cleared,
+  and every lookup missed. Scope is now the *principal*: the stored member
+  session (refresh token, which survives access-token rotation), or `anonymous`
+  when no session is stored. A genuine re-login under another account still
+  clears the cache.
+- **The anonymous token is minted once per process**, refreshed a minute before
+  it expires, instead of once per request. This removes an extra ~300 ms
+  round trip from every uncached call.
+- **Regression tests** cover all three: two identical calls across separately
+  constructed clients hit the network once, an anonymous token rotation keeps
+  serving hits, and `ah_cache_stats` reports the same cache the tool handlers
+  write to.
+
+---
+
 # Release Notes: appie-mcp v0.3.0
 
 We are pleased to announce **appie-mcp (v0.3.0)**. This release adds a

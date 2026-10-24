@@ -14,6 +14,7 @@ import {
   refreshTokens,
   exchangeCode,
   getAnonymousToken,
+  clearAnonymousTokenCache,
 } from "../src/auth.js";
 import { TokensData } from "../src/types.js";
 
@@ -38,6 +39,7 @@ describe("auth.ts", () => {
     delete process.env.AH_TOKENS_FILE;
     delete process.env.APPIE_REFRESH_TOKEN;
     delete process.env.AH_REFRESH_TOKEN;
+    clearAnonymousTokenCache();
   });
 
   afterEach(() => {

@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AhClient } from "../src/client.js";
+import { resetSharedCache } from "../src/cache.js";
 import { saveTokens } from "../src/auth.js";
 import { AhProduct } from "../src/types.js";
 
@@ -26,6 +27,8 @@ describe("client.ts - AhClient", () => {
       saved_at: new Date().toISOString(),
     });
 
+    // The response cache is process-wide; each case starts from a clean one.
+    resetSharedCache();
     client = new AhClient("https://api.ah.nl");
   });
 
@@ -726,6 +729,8 @@ describe("client.ts - AhClient.listReceipts pagination", () => {
       saved_at: new Date().toISOString(),
     });
 
+    // The response cache is process-wide; each case starts from a clean one.
+    resetSharedCache();
     client = new AhClient("https://api.ah.nl");
   });
 
@@ -872,6 +877,8 @@ describe("client.ts - AhClient pagination: bonus offers and promo digest", () =>
       saved_at: new Date().toISOString(),
     });
 
+    // The response cache is process-wide; each case starts from a clean one.
+    resetSharedCache();
     client = new AhClient("https://api.ah.nl");
   });
 

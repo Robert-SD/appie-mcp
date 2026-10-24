@@ -141,9 +141,11 @@ would make the assistant re-add an item you just added.
   need the current shelf price, say so and the assistant can rely on a
   fresh search result for a *different* term, or you can restart the server to
   drop the cache.
-* **Caching is per process.** If your client spawns a fresh server for every
-  session, each session starts with a cold cache and the benefit is limited to
-  repeats within one session.
+* **Caching is per process, not per client.** One cache instance serves every
+  tool call in the server process, and an anonymous session reuses a single
+  minted token instead of one per request. Only a client that spawns a
+  **new process per tool call** loses the cache between calls — then every
+  `ah_cache_stats` reading is all zeros however many searches precede it.
 * **Kill switch:** set `APPIE_MCP_CACHE=off` to disable the cache entirely (for
   debugging, or if you need guaranteed-live data). `APPIE_MCP_CACHE_MAX_ENTRIES`
   caps the number of cached responses (default 500).

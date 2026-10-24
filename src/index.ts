@@ -80,7 +80,7 @@ export function createServer(customClient?: AhClient): McpServer {
   const c = customClient || client;
   const server = new McpServer({
     name: "appie-mcp",
-    version: "0.3.0",
+    version: "0.3.1",
   });
 
   // 1. Tool: Login Status / Profile Verification

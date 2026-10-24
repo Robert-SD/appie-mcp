@@ -1,5 +1,5 @@
-import { AUTH_CONFIG, authFetch, getValidAccessToken } from "./auth.js";
-import { CacheStats, TtlCache, cacheKey } from "./cache.js";
+import { AUTH_CONFIG, authFetch, getValidAccessToken, loadTokens } from "./auth.js";
+import { CacheStats, TtlCache, cacheKey, getSharedCache } from "./cache.js";
 import {
   AhProduct,
   BonusOffer,
@@ -51,12 +51,7 @@ export class AhClient {
 
   constructor(baseUrl: string = AUTH_CONFIG.api_base, cache?: TtlCache) {
     this.baseUrl = baseUrl;
-    this.cache =
-      cache ??
-      new TtlCache({
-        enabled: process.env.APPIE_MCP_CACHE !== "off",
-        maxEntries: Number(process.env.APPIE_MCP_CACHE_MAX_ENTRIES ?? 500),
-      });
+    this.cache = cache ?? getSharedCache();
   }
 
   cacheStats(): CacheStats {
@@ -64,13 +59,22 @@ export class AhClient {
   }
 
   /**
-   * Fingerprint of the credential in use. It keeps a re-login (a new token
+   * Fingerprint of the principal in use. It keeps a re-login (a new token
    * file) from serving the previous account's cached data, and it clears the
-   * cache when the principal actually changes. The raw token never appears in
-   * the key: only its digest does.
+   * cache when the principal actually changes. The raw credential never
+   * appears in the key: only its digest does.
+   *
+   * Scope is keyed on the stored member session, never on the bearer token
+   * handed to this call: an anonymous session mints a throwaway token per
+   * request, so keying on it changed the scope — and wiped the whole cache —
+   * before every single lookup, leaving `hits` permanently at 0. A member's
+   * refresh token survives access-token rotation, so the scope stays stable
+   * until a genuinely different account logs in.
    */
-  private authScope(token: string): string {
-    const scope = token ? cacheKey("auth", [token]).split(" ").pop()! : "anonymous";
+  private authScope(): string {
+    const tokens = loadTokens();
+    const principal = tokens?.refresh_token || tokens?.access_token;
+    const scope = principal ? cacheKey("auth", [principal]).split(" ").pop()! : "anonymous";
     if (this.lastAuthScope !== null && this.lastAuthScope !== scope) {
       this.cache.clear();
     }
@@ -171,17 +175,22 @@ export class AhClient {
     scope: string
   ): string {
     const method = (options.method || "GET").toUpperCase();
+    // The cache is shared by every client in the process, so the host is part
+    // of the digest: two clients pointed at different bases must never trade
+    // entries. Invalidation stays prefix-based on `<METHOD> <path>`.
+    const host = this.baseUrl;
 
     if (method === "GET") {
       const query = Object.entries(options.query ?? {})
         .filter(([, v]) => v !== undefined && v !== null && v !== "")
         .map(([k, v]) => [k, String(v)] as [string, string])
         .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-      return cacheKey(`${method} ${endpoint}`, [scope, query]);
+      return cacheKey(`${method} ${endpoint}`, [host, scope, query]);
     }
 
     const body = options.body ?? {};
     return cacheKey(`${method} ${endpoint}`, [
+      host,
       scope,
       body.operationName ?? "",
       // The document text is part of the key: two documents can share an
@@ -201,7 +210,7 @@ export class AhClient {
     }
 
     const token = await getValidAccessToken();
-    const scope = this.authScope(token);
+    const scope = this.authScope();
     const key = this.cacheKeyFor(endpoint, options, scope);
     return await this.cache.wrap<T>(
       key,

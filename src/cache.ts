@@ -177,3 +177,32 @@ export class TtlCache {
     };
   }
 }
+
+/**
+ * The process-wide cache. Every AhClient that is not given an explicit cache
+ * shares this one, so a deployment that builds a client (or a whole server)
+ * per request still gets one warm cache per process instead of a fresh empty
+ * one per tool call — a per-request instance reports all-zero counters no
+ * matter how many cacheable calls preceded it.
+ */
+let sharedCache: TtlCache | null = null;
+
+export function getSharedCache(): TtlCache {
+  if (sharedCache === null) {
+    sharedCache = new TtlCache({
+      enabled: process.env.APPIE_MCP_CACHE !== "off",
+      maxEntries: Number(process.env.APPIE_MCP_CACHE_MAX_ENTRIES ?? 500),
+    });
+  }
+  return sharedCache;
+}
+
+/**
+ * Replace the shared cache with a fresh one. Tests use it to isolate cases;
+ * production code never needs it because the cache is meant to live for the
+ * whole process.
+ */
+export function resetSharedCache(): TtlCache {
+  sharedCache = null;
+  return getSharedCache();
+}
