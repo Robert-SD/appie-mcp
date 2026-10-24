@@ -4,8 +4,25 @@ import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import { exec } from "node:child_process";
 import * as https from "node:https";
-import { fileURLToPath } from "node:url";
 import { TokensData } from "./types.js";
+import {
+  AhAuthError,
+  getTokensFilePath,
+  loadTokens,
+  saveTokens,
+  assertTokensPathWritable,
+  resolveRefreshToken,
+  getTokenStore,
+  setTokenStore,
+  TOKENS_FILE_ENV_VAR,
+  LEGACY_TOKENS_FILE_ENV_VAR,
+  TokenStore,
+  FileTokenStore,
+  MemoryTokenStore,
+  HttpTokenStore,
+} from "./token-store.js";
+
+export * from "./token-store.js";
 
 export const AUTH_CONFIG = {
   domain: "login.ah.nl",
@@ -18,80 +35,6 @@ export const AUTH_CONFIG = {
   application: "NL",
   locale: "nl-NL",
 } as const;
-
-export class AhAuthError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "AhAuthError";
-    this.code = code;
-  }
-}
-
-export function getProjectDir(): string {
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const candidate = path.resolve(here, "..");
-    if (fs.existsSync(path.join(candidate, "package.json"))) {
-      return candidate;
-    }
-  } catch {
-    // Ignore
-  }
-  return process.cwd();
-}
-
-export function getTokensFilePath(): string {
-  const envPath = process.env.APPIE_TOKENS_FILE || process.env.AH_TOKENS_FILE;
-  if (envPath) return path.resolve(envPath.replace(/^~/, os.homedir()));
-
-  // 1. Primary: tokens.json in project root
-  const projectFile = path.join(getProjectDir(), "tokens.json");
-  if (fs.existsSync(projectFile)) return projectFile;
-
-  // 2. Working directory tokens.json
-  const cwdFile = path.resolve(process.cwd(), "tokens.json");
-  if (fs.existsSync(cwdFile)) return cwdFile;
-
-  // 3. Fallback to global config (~/.config/appie-mcp/tokens.json)
-  const globalConfig = path.join(os.homedir(), ".config", "appie-mcp", "tokens.json");
-  if (fs.existsSync(globalConfig)) return globalConfig;
-
-  // 4. Fallback to container data dir (/data/tokens.json)
-  const containerData = "/data/tokens.json";
-  if (fs.existsSync(containerData)) return containerData;
-
-  return projectFile;
-}
-
-export function loadTokens(): TokensData | null {
-  const filePath = getTokensFilePath();
-  if (fs.existsSync(filePath)) {
-    try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      return JSON.parse(content);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-export function saveTokens(tokens: TokensData): void {
-  try {
-    const filePath = getTokensFilePath();
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), "utf-8");
-    try {
-      fs.chmodSync(filePath, 0o600);
-    } catch {
-      // Ignore permissions failure on Windows
-    }
-  } catch {
-    // Ignore if running in a read-only environment
-  }
-}
 
 export function buildAuthorizeUrl(): string {
   const params = new URLSearchParams({
@@ -107,8 +50,12 @@ export function buildAuthorizeUrl(): string {
  */
 export async function authFetch(
   urlStr: string,
-  options: { method: string; headers?: Record<string, string>; body?: string }
+  options: { method: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }
 ): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<any> }> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason || new Error("The operation was aborted");
+  }
+
   let lastErr: any = null;
   const mergedHeaders: Record<string, string> = {
     "User-Agent": AUTH_CONFIG.user_agent,
@@ -127,9 +74,13 @@ export async function authFetch(
         method: options.method,
         headers: mergedHeaders,
         body: options.body,
+        signal: options.signal,
       });
     } catch (err: any) {
       lastErr = err;
+      if (options.signal?.aborted) {
+        throw options.signal.reason || err;
+      }
       const isEbadf =
         err?.message?.includes("EBADF") ||
         err?.cause?.code === "EBADF" ||
@@ -137,6 +88,10 @@ export async function authFetch(
       if (isEbadf) break;
       await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
     }
+  }
+
+  if (options.signal?.aborted) {
+    throw options.signal.reason || lastErr;
   }
 
   // 2. Try node:https with isolated agent
@@ -156,11 +111,31 @@ export async function authFetch(
           method: options.method || "POST",
           headers: reqHeaders,
           agent,
+          signal: options.signal,
         },
         (res) => {
           const chunks: Buffer[] = [];
+          const onAbort = () => {
+            res.destroy(options.signal?.reason || new Error("The operation was aborted"));
+          };
+          if (options.signal) {
+            if (options.signal.aborted) {
+              return reject(options.signal.reason || new Error("The operation was aborted"));
+            }
+            options.signal.addEventListener("abort", onAbort, { once: true });
+          }
+
           res.on("data", (c) => chunks.push(c));
+          res.on("error", (e) => {
+            if (options.signal) {
+              options.signal.removeEventListener("abort", onAbort);
+            }
+            reject(e);
+          });
           res.on("end", () => {
+            if (options.signal) {
+              options.signal.removeEventListener("abort", onAbort);
+            }
             const body = Buffer.concat(chunks).toString("utf-8");
             resolve({
               ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
@@ -177,6 +152,13 @@ export async function authFetch(
     });
   } catch (httpsErr: any) {
     lastErr = httpsErr;
+    if (options.signal?.aborted) {
+      throw options.signal.reason || httpsErr;
+    }
+  }
+
+  if (options.signal?.aborted) {
+    throw options.signal.reason || lastErr;
   }
 
   // 3. Fallback to system curl
@@ -199,7 +181,7 @@ export async function authFetch(
       if (options.body) {
         args.push("-d", options.body);
       }
-      execFile("curl", args, (err, stdout, stderr) => {
+      execFile("curl", args, { signal: options.signal }, (err, stdout, stderr) => {
         if (err) {
           return reject(new Error(`curl failed: ${err.message} (${stderr})`));
         }
@@ -260,54 +242,91 @@ export async function exchangeCode(
   tokens.is_anonymous = false;
 
   if (opts.save) {
-    saveTokens(tokens);
+    await saveTokens(tokens);
   }
 
   return tokens;
 }
 
+let inflightRefresh: Promise<TokensData> | null = null;
+
 export async function refreshTokens(existing?: TokensData): Promise<TokensData> {
-  const tokens = existing || loadTokens();
-  const rToken = tokens?.refresh_token || process.env.APPIE_REFRESH_TOKEN || process.env.AH_REFRESH_TOKEN;
+  const store = getTokenStore();
+  const initialTokens = existing || (await loadTokens());
+  const initialRefreshToken = initialTokens?.refresh_token;
+  const initialSavedAt = initialTokens?.saved_at;
 
-  if (!rToken) {
-    throw new AhAuthError(
-      "MISSING_REFRESH_TOKEN",
-      "No Albert Heijn refresh_token is available. Run 'appie-mcp login' to re-authenticate."
-    );
-  }
+  const doRefresh = async (ctx?: { waited?: boolean }): Promise<TokensData> => {
+    const tokens = (await loadTokens()) || initialTokens || null;
+    const { token: rToken } = resolveRefreshToken(tokens);
 
-  const tokenUrl = `${AUTH_CONFIG.api_base}/mobile-auth/v1/auth/token/refresh`;
-  const payload = {
-    clientId: AUTH_CONFIG.client_id,
-    refreshToken: rToken,
+    // Coalesce concurrent refreshes: if another process refreshed the token
+    // while we waited for the lock, reuse the fresh token rather than hitting AH API twice.
+    if (ctx?.waited) {
+      const tokenChanged = Boolean(
+        tokens &&
+          ((initialRefreshToken && tokens.refresh_token !== initialRefreshToken) ||
+            (initialSavedAt && tokens.saved_at !== initialSavedAt))
+      );
+      if (tokenChanged && tokens?.access_token) {
+        return tokens;
+      }
+    }
+
+    if (!rToken) {
+      throw new AhAuthError(
+        "MISSING_REFRESH_TOKEN",
+        `No Albert Heijn refresh_token is available (nothing in ${getTokensFilePath()} and no ` +
+          `${TOKENS_FILE_ENV_VAR}/${LEGACY_TOKENS_FILE_ENV_VAR} is set). Run 'appie-mcp login' to authenticate.`
+      );
+    }
+
+    await assertTokensPathWritable();
+
+    const tokenUrl = `${AUTH_CONFIG.api_base}/mobile-auth/v1/auth/token/refresh`;
+    const payload = {
+      clientId: AUTH_CONFIG.client_id,
+      refreshToken: rToken,
+    };
+
+    const resp = await authFetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new AhAuthError(
+        "TOKEN_REFRESH_FAILED",
+        `Albert Heijn token refresh failed (${resp.status}): ${errText}`
+      );
+    }
+
+    const refreshed = (await resp.json()) as TokensData;
+    refreshed.saved_at = new Date().toISOString();
+    refreshed.is_anonymous = false;
+
+    // Preserve refresh token if the response omitted a rotated token
+    if (!refreshed.refresh_token) {
+      refreshed.refresh_token = rToken;
+    }
+
+    await saveTokens(refreshed);
+    return refreshed;
   };
 
-  const resp = await authFetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new AhAuthError(
-      "TOKEN_REFRESH_FAILED",
-      `Albert Heijn token refresh failed (${resp.status}): ${errText}`
-    );
+  if (store.withLock) {
+    return await store.withLock(doRefresh);
   }
 
-  const refreshed = (await resp.json()) as TokensData;
-  refreshed.saved_at = new Date().toISOString();
-  refreshed.is_anonymous = false;
-
-  // Preserve refresh token if the response omitted a rotated token
-  if (!refreshed.refresh_token) {
-    refreshed.refresh_token = rToken;
+  if (!inflightRefresh) {
+    inflightRefresh = doRefresh().finally(() => {
+      inflightRefresh = null;
+    });
   }
-
-  saveTokens(refreshed);
-  return refreshed;
+  return await inflightRefresh;
 }
 
 export async function getAnonymousToken(): Promise<TokensData> {
@@ -362,9 +381,9 @@ async function getCachedAnonymousToken(): Promise<string> {
 }
 
 export async function getValidAccessToken(): Promise<string> {
-  const tokens = loadTokens();
+  const tokens = await loadTokens();
   let accessToken = tokens?.access_token;
-  const refreshToken = tokens?.refresh_token || process.env.APPIE_REFRESH_TOKEN || process.env.AH_REFRESH_TOKEN;
+  const { token: refreshToken } = resolveRefreshToken(tokens);
 
   if (!accessToken && !refreshToken) {
     // If no user session is available, fallback to an anonymous token for search/browsing
