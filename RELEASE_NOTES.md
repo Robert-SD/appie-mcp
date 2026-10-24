@@ -1,3 +1,22 @@
+# Release Notes: appie-mcp v0.4.0
+
+A reliability and architecture release adding pluggable token storage, advisory file locking, atomic writes, and XDG Base Directory standard path resolution.
+
+---
+
+## 🌟 What's New in v0.4.0
+
+- **Pluggable Token Storage (`src/token-store.ts`)**: Extracted all token loading and persistence logic into a dedicated module with a pluggable `TokenStore` interface. Built-in implementations include `FileTokenStore`, `MemoryTokenStore`, and `HttpTokenStore` (pluggable via `setTokenStore()`).
+- **Cross-Process Advisory File Locking**: `FileTokenStore` implements advisory locking via `.tokens.json.lock` using atomic `O_CREAT | O_EXCL` flags, preventing concurrent processes from simultaneously refreshing tokens and causing race conditions.
+- **Ownership & Stale Lock Breaking**: Lockfiles track PID, hostname, and a unique owner UUID. Stale or orphaned locks from crashed processes are safely detected and broken (via PID probing on POSIX and wall-clock thresholds across containers/hosts).
+- **Lock-Wait & Single-Flight Coalescing**: Refreshes waiting on a lock check if the token was refreshed while waiting; if so, the fresh token is returned immediately without contacting the Albert Heijn API again. In-process single-flight coalescing prevents concurrent asynchronous callers within the same process from duplicating requests.
+- **Atomic File Writes & Safe Permissions**: Replaced direct file overwrites with atomic temporary file writes (`.tokens.<timestamp>.<rand>.tmp` + `renameSync`) and restricted file permissions (`0o600`), preventing partial corruption on sudden process termination.
+- **Preflight Write Assertions**: `assertTokensPathWritable()` tests directory and file write access before dispatching refresh requests, avoiding burning valid tokens when destination storage is unwriteable.
+- **XDG Base Directory Standard**: Tokens now resolve following XDG conventions, defaulting to `~/.config/appie-mcp/tokens.json` for new sessions rather than polluting project repository working directories, while preserving existing project-root files and honoring `APPIE_TOKENS_FILE` / `AH_TOKENS_FILE`.
+- **Resilient HTTP Transport (`authFetch`)**: Implemented 3-tier fallback (`fetch` -> `node:https` -> system `curl`) with strict abort signal propagation, stream abort cleanup on response bodies, and passing abort signals to `curl` child processes.
+
+---
+
 # Release Notes: appie-mcp v0.3.1
 
 A correctness release for the v0.3.0 response cache, which was inert in
