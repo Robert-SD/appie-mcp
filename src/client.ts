@@ -71,8 +71,8 @@ export class AhClient {
    * refresh token survives access-token rotation, so the scope stays stable
    * until a genuinely different account logs in.
    */
-  private authScope(): string {
-    const tokens = loadTokens();
+  private async authScope(): Promise<string> {
+    const tokens = await loadTokens();
     const principal = tokens?.refresh_token || tokens?.access_token;
     const scope = principal ? cacheKey("auth", [principal]).split(" ").pop()! : "anonymous";
     if (this.lastAuthScope !== null && this.lastAuthScope !== scope) {
@@ -210,7 +210,7 @@ export class AhClient {
     }
 
     const token = await getValidAccessToken();
-    const scope = this.authScope();
+    const scope = await this.authScope();
     const key = this.cacheKeyFor(endpoint, options, scope);
     return await this.cache.wrap<T>(
       key,

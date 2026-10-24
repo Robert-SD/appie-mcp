@@ -27,12 +27,12 @@ export function toolError(error: any) {
 }
 
 async function showStatus(): Promise<void> {
-  let tokens = loadTokens();
+  let tokens = await loadTokens();
   if (!tokens && (process.env.APPIE_REFRESH_TOKEN || process.env.AH_REFRESH_TOKEN)) {
     try {
       tokens = await refreshTokens();
-    } catch {
-      // Ignore
+    } catch (error: any) {
+      console.error(`⚠️ Bootstrap from refresh token failed: ${error.message}`);
     }
   }
 

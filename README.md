@@ -175,7 +175,9 @@ Add this to your `claude_desktop_config.json`:
 
 ## 🔒 Safety & Guardrails
 * **No Automatic Checkout:** The server does not handle payment, credit cards, or final order submission. All purchases and checkout actions remain strictly human-in-the-loop.
-* **Stateless Token Refreshing:** Tokens are safely stored locally in `tokens.json` (with restricted `0600` permissions) and silently renewed in the background.
+* **Resilient Token Persistence:** Stored tokens are renewed safely in the background with cross-process advisory locking (`.tokens.json.lock`), atomic file writes (`0o600`), and lock-wait coalescing to avoid duplicate refresh requests.
+* **XDG Path Resolution & Container Volumes:** Tokens resolve following the XDG Base Directory standard, defaulting to `~/.config/appie-mcp/tokens.json`. In a container, mount a persistent volume and set `APPIE_TOKENS_FILE=/data/tokens.json` (or mount `/data`).
+* **Pluggable Token Storage:** For headless or containerized environments, custom implementations of `TokenStore` (`FileTokenStore`, `MemoryTokenStore`, `HttpTokenStore`, or custom backends) can be plugged in via `setTokenStore()`.
 
 ## 📄 License
 MIT © Robert Schulze Dieckhoff
