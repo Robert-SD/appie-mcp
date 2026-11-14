@@ -339,24 +339,46 @@ describe("client.ts - AhClient", () => {
 
     it("strips 'wi' prefix from product IDs in getProduct", async () => {
       let requestedUrl = "";
-      globalThis.fetch = async (input) => {
+      let parsedBody: any = null;
+      globalThis.fetch = async (input, init) => {
         requestedUrl = String(input);
+        parsedBody = JSON.parse(String(init?.body ?? "{}"));
         return new Response(
-          JSON.stringify({ productCard: { id: 196825, title: "Test Product" } }),
+          JSON.stringify({
+            data: {
+              product: {
+                id: 196825,
+                title: "Test Product",
+                brand: "AH",
+                salesUnitSize: "500 g",
+                priceV2: {
+                  now: { amount: 1.99 },
+                  was: { amount: 2.49 },
+                  discount: { description: "20% korting", promotionType: "BONUS" },
+                },
+                imagePack: [{ large: { url: "https://static.ah.nl/img.jpg", width: 800, height: 800 } }],
+              },
+            },
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       };
 
       const product = await client.getProduct("wi196825");
       assert.equal(product.id, 196825);
-      assert.ok(requestedUrl.endsWith("/mobile-services/product/detail/v4/products/196825"));
+      assert.equal(product.price.now, 1.99);
+      assert.equal(product.price.was, 2.49);
+      assert.equal(product.bonus, true);
+      assert.ok(requestedUrl.endsWith("/graphql"));
+      assert.equal(parsedBody.operationName, "FetchProductDetails");
+      assert.deepEqual(parsedBody.variables, { productId: 196825 });
     });
 
-    it("formats comma-separated productIds in getProductsBulk", async () => {
+    it("formats repeated ids query parameters in getProductsBulk", async () => {
       let requestedUrl = "";
       globalThis.fetch = async (input) => {
         requestedUrl = String(input);
-        return new Response(JSON.stringify([]), {
+        return new Response(JSON.stringify({ products: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -364,8 +386,9 @@ describe("client.ts - AhClient", () => {
 
       await client.getProductsBulk(["wi100", 200, "wi300"]);
       const parsed = new URL(requestedUrl);
-      assert.equal(parsed.pathname, "/mobile-services/product/detail/v4/products/bulk");
-      assert.equal(parsed.searchParams.get("productIds"), "100,200,300");
+      assert.equal(parsed.pathname, "/mobile-services/product/search/v2/products");
+      assert.deepEqual(parsed.searchParams.getAll("ids"), ["100", "200", "300"]);
+      assert.equal(parsed.searchParams.get("sortOn"), "INPUT_PRODUCT_IDS");
     });
 
     it("formats request body, sets Content-Type and Authorization headers", async () => {
@@ -373,15 +396,17 @@ describe("client.ts - AhClient", () => {
       let authHeader = "";
       let contentType = "";
       let requestBody = "";
+      let requestUrl = "";
 
       globalThis.fetch = async (input, init) => {
+        requestUrl = String(input);
         requestMethod = init?.method || "GET";
         const headers = init?.headers as Record<string, string>;
         authHeader = headers?.["Authorization"] || "";
         contentType = headers?.["Content-Type"] || "";
         requestBody = String(init?.body || "");
 
-        return new Response(JSON.stringify({ success: true }), {
+        return new Response(JSON.stringify({ items: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -392,17 +417,23 @@ describe("client.ts - AhClient", () => {
         { productId: 196825, quantity: 1, type: "PRODUCT" },
       ]);
 
-      assert.equal(requestMethod, "POST");
+      assert.ok(requestUrl.endsWith("/mobile-services/shoppinglist/v2/items"));
+      assert.equal(requestMethod, "PATCH");
       assert.equal(authHeader, "Bearer test_access_token_12345");
       assert.equal(contentType, "application/json");
 
       const parsedBody = JSON.parse(requestBody);
       assert.equal(parsedBody.items.length, 2);
-      assert.equal(parsedBody.items[0].text, "Bio bananen");
+      assert.equal(parsedBody.items[0].originCode, "TXT");
+      assert.equal(parsedBody.items[0].description, "Bio bananen");
+      assert.equal(parsedBody.items[0].searchTerm, "Bio bananen");
       assert.equal(parsedBody.items[0].quantity, 3);
-      assert.equal(parsedBody.items[0].type, "FREE_TEXT");
+      assert.equal(parsedBody.items[0].type, "SHOPPABLE");
+      assert.equal(parsedBody.items[0].strikeThrough, false);
+      assert.equal(parsedBody.items[1].originCode, "PRD");
       assert.equal(parsedBody.items[1].productId, 196825);
-      assert.equal(parsedBody.items[1].type, "PRODUCT");
+      assert.equal(parsedBody.items[1].type, "SHOPPABLE");
+      assert.equal(parsedBody.items[1].quantity, 1);
     });
   });
 
@@ -803,33 +834,316 @@ describe("client.ts - AhClient", () => {
       assert.equal(details.lines?.[0].unitPrice, 1.29);
     });
 
-    it("searchStores maps store addresses and opening status", async () => {
-      globalThis.fetch = async () => {
+    it("searchStores maps store addresses and filters city/postalCode via GraphQL", async () => {
+      let capturedVariables: any = null;
+      globalThis.fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        capturedVariables = body.variables;
         return new Response(
-          JSON.stringify([
-            {
-              id: 1234,
-              name: "AH Museumplein",
-              address: { street: "Van Baerlestraat 33", postalCode: "1071AP", city: "Amsterdam" },
-              distance: 1.2,
-              isOpenNow: true,
-              facilities: ["ZELFSCAN", "GALL_AND_GALL"],
+          JSON.stringify({
+            data: {
+              storesSearch: {
+                pageInfo: { total: 2, hasNextPage: false },
+                result: [
+                  {
+                    id: 1234,
+                    name: "AH Museumplein",
+                    address: {
+                      street: "Van Baerlestraat",
+                      houseNumber: 33,
+                      postalCode: "1071AP",
+                      city: "Amsterdam",
+                    },
+                    openingDays: [],
+                    services: [
+                      { code: "ZELFSCAN", description: "Zelfscan" },
+                      { code: "GALL_AND_GALL", description: "Gall & Gall" },
+                    ],
+                  },
+                  {
+                    id: 5678,
+                    name: "AH Utrecht CS",
+                    address: {
+                      street: "Stationshal",
+                      houseNumber: 1,
+                      postalCode: "3511CE",
+                      city: "Utrecht",
+                    },
+                    openingDays: [],
+                    services: [],
+                  },
+                ],
+              },
             },
-          ]),
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       };
 
       const stores = await client.searchStores("Amsterdam");
+      assert.deepEqual(capturedVariables, { filter: {}, limit: 1500 });
       assert.equal(stores.length, 1);
       assert.equal(stores[0].id, 1234);
       assert.equal(stores[0].name, "AH Museumplein");
       assert.equal(stores[0].street, "Van Baerlestraat 33");
       assert.equal(stores[0].postalCode, "1071AP");
       assert.equal(stores[0].city, "Amsterdam");
-      assert.equal(stores[0].distanceKm, 1.2);
-      assert.equal(stores[0].isOpenNow, true);
       assert.deepEqual(stores[0].facilities, ["ZELFSCAN", "GALL_AND_GALL"]);
+
+      await client.searchStores("1071 ap");
+      assert.deepEqual(capturedVariables, { filter: { postalCode: "1071AP" }, limit: 20 });
+    });
+
+    it("getProductAlternatives, getCategories, and getSubCategories query GraphQL", async () => {
+      const operations: Array<{ op: string; vars: any }> = [];
+      globalThis.fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        operations.push({ op: body.operationName, vars: body.variables });
+        if (body.operationName === "FetchProductAlternatives") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                productAlternatives: {
+                  products: [{ id: 222, title: "Alt Melk", priceV2: { now: { amount: 1.49 } } }],
+                },
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (body.operationName === "FetchCategories") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                productTopLevelTaxonomies: [{ id: 1, name: "Zuivel", slug: "zuivel", active: true }],
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              productTaxonomyById: [
+                { id: 1, name: "Zuivel" },
+                { id: 10, name: "Melk" },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const alts = await client.getProductAlternatives("wi111");
+      assert.equal(alts.length, 1);
+      assert.equal(alts[0].id, 222);
+
+      const cats = await client.getCategories();
+      assert.equal(cats.length, 1);
+      assert.equal(cats[0].name, "Zuivel");
+
+      const subs = await client.getSubCategories(1);
+      assert.deepEqual(subs, [{ id: 10, name: "Melk" }]);
+      assert.deepEqual(
+        operations.map((o) => o.op),
+        ["FetchProductAlternatives", "FetchCategories", "FetchSubCategories"]
+      );
+    });
+
+    it("getBonusGroupProducts and getPersonalBonus use bonuspage/v3/metadata dates", async () => {
+      const urls: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.includes("/mobile-services/bonuspage/v3/metadata")) {
+          return new Response(
+            JSON.stringify({ periods: [{ bonusStartDate: "2026-11-09", bonusEndDate: "2026-11-15" }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes("/mobile-services/bonuspage/v1/personal")) {
+          return new Response(
+            JSON.stringify({
+              bonusGroupOrProducts: [{ product: { webshopId: 123, title: "Persoonlijke Bonus" } }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        assert.equal(body.operationName, "FetchBonusPromotionWithProducts");
+        assert.equal(body.variables.id, "42");
+        assert.equal(body.variables.periodStart, "2026-11-09");
+        assert.equal(body.variables.periodEnd, "2026-11-15");
+        return new Response(
+          JSON.stringify({
+            data: {
+              bonusPromotions: [
+                { id: "42", title: "Koffie", products: [{ id: 99, title: "Bonus Koffie", priceV2: { now: { amount: 4.5 } } }] },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const groupProducts = await client.getBonusGroupProducts(42);
+      assert.equal(groupProducts.length, 1);
+      assert.equal(groupProducts[0].title, "Bonus Koffie");
+
+      const personal = await client.getPersonalBonus();
+      assert.equal(personal.length, 1);
+      assert.equal(personal[0].title, "Persoonlijke Bonus");
+      assert.ok(urls.some((u) => u.includes("bonusStartDate=2026-11-09")));
+    });
+
+    it("getClearanceBargains queries BargainItems and handles missing store gracefully", async () => {
+      let requestedOp = "";
+      globalThis.fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        requestedOp = body.operationName;
+        if (body.variables.storeId === "999999") {
+          return new Response(
+            JSON.stringify({
+              data: null,
+              errors: [{ message: "Store not found", path: ["bargainItems"] }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              bargainItems: [
+                {
+                  product: { id: "555", title: "Brood", brand: "AH", salesUnitSize: "1 stuk" },
+                  categoryTitle: "Bakkerij",
+                  markdown: { markdownType: "35%", markdownPercentage: 35, markdownExpirationDate: "2026-11-15" },
+                  stock: 3,
+                  bargainPrice: { priceWas: 2.0, priceNow: 1.3 },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const bargains = await client.getClearanceBargains(1234);
+      assert.equal(requestedOp, "BargainItems");
+      assert.equal(bargains.length, 1);
+      assert.equal(bargains[0].productId, "555");
+      assert.equal(bargains[0].nowPrice, 1.3);
+      assert.equal(bargains[0].discountPercentage, 35);
+
+      const missing = await client.getClearanceBargains(999999);
+      assert.deepEqual(missing, []);
+    });
+
+    it("removeShoppingListItem removes PRD and TXT items via PATCH quantity 0", async () => {
+      const patches: any[] = [];
+      globalThis.fetch = async (input, init) => {
+        const method = init?.method || "GET";
+        if (method === "GET") {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  listItemId: 0,
+                  originCode: "PRD",
+                  quantity: 2,
+                  strikedthrough: false,
+                  productDetails: { product: { webshopId: 196825, title: "Melk" } },
+                },
+                {
+                  listItemId: 0,
+                  originCode: "TXT",
+                  quantity: 1,
+                  strikedthrough: false,
+                  vagueTermDetails: { searchTermValue: "Bio bananen" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        patches.push({ url: String(input), method, body: JSON.parse(String(init?.body ?? "{}")) });
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      await client.removeShoppingListItem("prd:196825");
+      await client.removeShoppingListItem("txt:Bio bananen");
+
+      assert.equal(patches.length, 2);
+      assert.equal(patches[0].method, "PATCH");
+      assert.equal(patches[0].body.items[0].originCode, "PRD");
+      assert.equal(patches[0].body.items[0].productId, 196825);
+      assert.equal(patches[0].body.items[0].quantity, 0);
+
+      assert.equal(patches[1].body.items[0].originCode, "TXT");
+      assert.equal(patches[1].body.items[0].description, "Bio bananen");
+      assert.equal(patches[1].body.items[0].quantity, 0);
+    });
+
+    it("favorite lists, getCart, and getPredictiveFavorites use updated GraphQL and REST endpoints", async () => {
+      const requests: Array<{ url: string; method: string; body: any }> = [];
+      globalThis.fetch = async (input, init) => {
+        const url = String(input);
+        const method = init?.method || "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        requests.push({ url, method, body });
+
+        if (url.endsWith("/mobile-services/v2/recommendations/dontforgetlane")) {
+          return new Response(
+            JSON.stringify({ productCards: [{ webshopId: 777, title: "Havermout" }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (body?.operationName === "FetchFavoriteLists") {
+          return new Response(
+            JSON.stringify({
+              data: { favoriteListV2: [{ id: "abc-1", description: "Weekboodschappen", totalSize: 1, items: [{ id: "item-1", productId: 777, quantity: 2 }] }] },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (body?.operationName === "AddProductsToFavoriteList") {
+          return new Response(
+            JSON.stringify({ data: { favoriteListProductsAddV2: { status: "SUCCESS", errorMessage: null } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (body?.operationName === "DeleteProductsFromFavoriteList") {
+          return new Response(
+            JSON.stringify({ data: { favoriteListProductsDeleteV2: { status: "SUCCESS", errorMessage: null } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({ data: { basket: { summary: { quantity: 1 } }, order: null } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const lists = await client.getFavoriteLists();
+      assert.equal(lists[0].id, "abc-1");
+      assert.equal(lists[0].title, "Weekboodschappen");
+      assert.equal(lists[0].itemCount, 1);
+
+      await client.addFavoriteListItem("abc-1", { productId: 777, quantity: 2 });
+      await client.removeFavoriteListItem("abc-1", "item-1");
+      assert.equal(requests[1].body.variables.favoriteListId, "ABC-1");
+      assert.equal(requests[2].body.variables.favoriteListId, "ABC-1");
+
+      const cart = await client.getCart();
+      assert.equal(cart.basket.summary.quantity, 1);
+
+      const predictive = await client.getPredictiveFavorites();
+      assert.equal(predictive.length, 1);
+      assert.equal(predictive[0].title, "Havermout");
+      assert.equal(requests[4].method, "POST");
     });
   });
 });
