@@ -113,6 +113,22 @@ export class AhClient {
           shouldCache: (payload: any) => Boolean(payload?.data?.store),
         };
       }
+      if (operationName === "FetchRecipes") {
+        return {
+          ttl: CACHE_TTL.catalog,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.recipeSearchV2?.result) &&
+            payload.data.recipeSearchV2.result.length > 0,
+        };
+      }
+      if (operationName === "FetchRecipeDetails") {
+        return {
+          ttl: CACHE_TTL.catalog,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length && Boolean(payload?.data?.recipe?.id),
+        };
+      }
       // FetchMember (profile) and FetchPosReceiptsPage (receipt overview) are
       // live-only: they carry personal data or a list that changes.
       return null;
@@ -133,9 +149,6 @@ export class AhClient {
       };
     }
     if (endpoint.startsWith("/mobile-services/v1/product-shelves/categories")) {
-      return { ttl: CACHE_TTL.catalog };
-    }
-    if (endpoint.startsWith("/mobile-services/recipe/v2")) {
       return { ttl: CACHE_TTL.catalog };
     }
     if (endpoint.startsWith("/mobile-services/store/v1/stores")) {
@@ -804,70 +817,239 @@ export class AhClient {
   }
 
   /**
-   * 7. Allerhande Recipes
+   * 7. Allerhande Recipes (via GraphQL gateway)
    */
-  async searchRecipes(query: string, page: number = 0, size: number = 10): Promise<Recipe[]> {
-    try {
-      const data = await this.request<any>("/mobile-services/recipe/v2/search", {
-        query: { query, page, size },
-      });
-      const rawList = data.recipes || (Array.isArray(data) ? data : []);
-      return rawList.map((r: any) => ({
-        id: r.id,
-        title: r.title || r.name,
-        servings: r.servings,
-        prepTimeMinutes: r.prepTime || r.cookingTime,
-        imageUrl: r.image?.url || r.imageUrl,
-        ingredients: (r.ingredients || []).map((ing: any) => ({
-          name: ing.name || ing.ingredient,
-          amount: ing.amount,
-          unit: ing.unit,
-          productId: ing.productId,
-        })),
-      }));
-    } catch (error: any) {
-      if (
-        error?.status === 404 ||
-        error?.message?.includes("(404)") ||
-        error?.message?.toLowerCase().includes("not found")
-      ) {
-        return [];
+  private static pickLargestRecipeImage(
+    images?: Array<{ url?: string; width?: number; height?: number }>
+  ): string | undefined {
+    if (!Array.isArray(images)) return undefined;
+    let bestUrl: string | undefined;
+    let bestArea = -1;
+    for (const img of images) {
+      if (!img?.url) continue;
+      const area = (img.width ?? 0) * (img.height ?? 0);
+      if (area >= bestArea) {
+        bestArea = area;
+        bestUrl = img.url;
       }
-      throw error;
     }
+    return bestUrl;
   }
 
-  async getRecipeDetails(recipeId: string | number): Promise<Recipe | { error: string; message: string }> {
-    try {
-      const data = await this.request<any>(`/mobile-services/recipe/v2/${recipeId}`);
-      return {
-        id: data.id || recipeId,
-        title: data.title || data.name,
-        servings: data.servings,
-        prepTimeMinutes: data.prepTime || data.cookingTime,
-        imageUrl: data.image?.url || data.imageUrl,
-        instructions: data.instructions || data.steps || [],
-        ingredients: (data.ingredients || []).map((ing: any) => ({
-          name: ing.name || ing.ingredient,
-          amount: ing.amount,
-          unit: ing.unit,
-          productId: ing.productId,
-          available: ing.available,
-        })),
-      };
-    } catch (error: any) {
-      if (
-        error?.status === 404 ||
-        error?.message?.includes("(404)") ||
-        error?.message?.toLowerCase().includes("not found")
-      ) {
+  private static toRecipeUrl(
+    href?: string | null,
+    id?: number | string,
+    slug?: string | null
+  ): string | undefined {
+    if (href) {
+      return href.startsWith("http") ? href : `https://www.ah.nl${href}`;
+    }
+    if (id !== undefined && id !== null && slug) {
+      return `https://www.ah.nl/allerhande/recept/R-R${id}/${slug}`;
+    }
+    return undefined;
+  }
+
+  private static formatGraphQlErrors(errors: any[]): string {
+    return errors.map((e) => e?.message || JSON.stringify(e)).join("; ");
+  }
+
+  async searchRecipes(query: string, page: number = 0, size: number = 10): Promise<Recipe[]> {
+    const safePage = Math.max(0, Math.trunc(page));
+    const safeSize = Math.max(1, Math.trunc(size));
+
+    const resp = await this.request<any>("/graphql", {
+      method: "POST",
+      body: {
+        operationName: "FetchRecipes",
+        variables: {
+          searchText: query,
+          start: safePage * safeSize,
+          size: safeSize,
+          sortBy: "MOST_RELEVANT",
+          filters: [],
+          priorityRecipeIds: [],
+          boostFavoriteRecipeIds: [],
+          recipeIds: [],
+          ingredients: [],
+        },
+        query: `query FetchRecipes(
+          $searchText: String
+          $start: Int
+          $size: PageSize
+          $sortBy: RecipeSearchSortOption
+          $filters: [RecipeSearchQueryFilter!]
+          $priorityRecipeIds: [Int!]
+          $boostFavoriteRecipeIds: [Int!]
+          $recipeIds: [Int!]!
+          $ingredients: [String!]
+        ) {
+          recipeSearchV2(
+            searchText: $searchText
+            start: $start
+            size: $size
+            sortBy: $sortBy
+            filters: $filters
+            priorityRecipeIds: $priorityRecipeIds
+            boostFavoriteRecipeIds: $boostFavoriteRecipeIds
+            recipeIds: $recipeIds
+            ingredients: $ingredients
+          ) {
+            page {
+              total
+              hasNextPage
+            }
+            result {
+              id
+              title
+              slug
+              time {
+                cook
+                oven
+                wait
+              }
+              serving {
+                number
+              }
+              images(renditions: [S, M, D445X297, D890X594]) {
+                width
+                height
+                url
+              }
+            }
+          }
+        }`,
+      },
+    });
+
+    if (Array.isArray(resp?.errors) && resp.errors.length > 0) {
+      throw new Error(
+        `Albert Heijn GraphQL error at FetchRecipes: ${AhClient.formatGraphQlErrors(resp.errors)}`
+      );
+    }
+
+    const rawList = resp?.data?.recipeSearchV2?.result;
+    if (!Array.isArray(rawList)) {
+      throw new Error("Unexpected response shape from FetchRecipes: missing recipeSearchV2.result");
+    }
+
+    return rawList.map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      servings: r.serving?.number ?? undefined,
+      prepTimeMinutes: r.time?.cook ?? r.time?.oven ?? undefined,
+      ovenTimeMinutes: r.time?.oven ?? undefined,
+      waitTimeMinutes: r.time?.wait ?? undefined,
+      imageUrl: AhClient.pickLargestRecipeImage(r.images),
+      url: AhClient.toRecipeUrl(undefined, r.id, r.slug),
+      ingredients: [],
+    }));
+  }
+
+  async getRecipeDetails(
+    recipeId: string | number
+  ): Promise<Recipe | { error: string; message: string }> {
+    const numericId = Number(String(recipeId).trim().replace(/^R-R/i, ""));
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new Error(`Invalid recipe ID: ${recipeId}`);
+    }
+
+    const resp = await this.request<any>("/graphql", {
+      method: "POST",
+      body: {
+        operationName: "FetchRecipeDetails",
+        variables: { id: numericId },
+        query: `query FetchRecipeDetails($id: Int!) {
+          recipe(id: $id) {
+            id
+            title
+            href
+            cookTime
+            ovenTime
+            waitTime
+            servings {
+              number
+            }
+            images {
+              width
+              height
+              url
+            }
+            ingredients {
+              id
+              name {
+                singular
+                plural
+              }
+              quantity
+              quantityUnit {
+                singular
+                plural
+              }
+              text
+            }
+            preparation {
+              steps
+            }
+          }
+        }`,
+      },
+    });
+
+    const data = resp?.data?.recipe;
+    if (data === null) {
+      const onlyRecipePathError =
+        !resp?.errors?.length ||
+        resp.errors.every(
+          (e: any) => Array.isArray(e?.path) && e.path.length === 1 && e.path[0] === "recipe"
+        );
+      if (onlyRecipePathError) {
         return {
           error: "Not Found",
           message: `Recipe not found for ID: ${recipeId}`,
         };
       }
-      throw error;
     }
+
+    if (Array.isArray(resp?.errors) && resp.errors.length > 0) {
+      throw new Error(
+        `Albert Heijn GraphQL error at FetchRecipeDetails: ${AhClient.formatGraphQlErrors(resp.errors)}`
+      );
+    }
+
+    if (!data) {
+      throw new Error("Unexpected response shape from FetchRecipeDetails: missing data.recipe");
+    }
+
+    return {
+      id: data.id ?? numericId,
+      title: data.title,
+      servings: data.servings?.number ?? undefined,
+      prepTimeMinutes: data.cookTime ?? data.ovenTime ?? undefined,
+      ovenTimeMinutes: data.ovenTime ?? undefined,
+      waitTimeMinutes: data.waitTime ?? undefined,
+      imageUrl: AhClient.pickLargestRecipeImage(data.images),
+      url: AhClient.toRecipeUrl(data.href, data.id ?? numericId),
+      instructions: Array.isArray(data.preparation?.steps) ? data.preparation.steps : [],
+      ingredients: (data.ingredients || []).map((ing: any) => {
+        const amount = typeof ing.quantity === "number" ? ing.quantity : undefined;
+        const usePlural = amount !== undefined && amount !== 1;
+        const name =
+          (usePlural
+            ? ing.name?.plural || ing.name?.singular
+            : ing.name?.singular || ing.name?.plural) ||
+          ing.text ||
+          "";
+        const rawUnit = usePlural
+          ? ing.quantityUnit?.plural || ing.quantityUnit?.singular
+          : ing.quantityUnit?.singular || ing.quantityUnit?.plural;
+        return {
+          name,
+          amount,
+          unit: rawUnit || undefined,
+        };
+      }),
+    };
   }
 
   /**

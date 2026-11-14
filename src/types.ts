@@ -105,6 +105,8 @@ export interface Recipe {
   title: string;
   servings?: number;
   prepTimeMinutes?: number;
+  ovenTimeMinutes?: number;
+  waitTimeMinutes?: number;
   ingredients: RecipeIngredient[];
   instructions?: string[];
   imageUrl?: string;

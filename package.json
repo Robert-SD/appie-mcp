@@ -16,6 +16,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test test/*.test.ts",
+    "test:smoke": "node --import tsx --test test/live.smoke.ts",
     "login": "tsx src/index.ts login",
     "status": "tsx src/index.ts status",
     "prepare": "npm run build"
