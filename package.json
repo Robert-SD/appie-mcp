@@ -1,6 +1,6 @@
 {
   "name": "appie-mcp",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Model Context Protocol (MCP) server for Albert Heijn (Appie) - Digital receipts, shopping list, bonus deals, and grocery management",
   "main": "dist/index.js",
   "bin": {
@@ -14,7 +14,9 @@
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
     "start": "node dist/index.js",
+    "start:http": "node dist/index.js http",
     "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/index.ts http",
     "test": "node --import tsx --test test/*.test.ts",
     "test:smoke": "node --import tsx --test test/live.smoke.ts",
     "login": "tsx src/index.ts login",
