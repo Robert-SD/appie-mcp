@@ -481,28 +481,69 @@ describe("client.ts - AhClient", () => {
       );
     });
 
-    // Existing recipe 404 fallback behavior
-    it("searchRecipes returns empty array on 404", async () => {
-      client.request = async () => {
-        const err = new Error("Albert Heijn API error (404) at /mobile-services/recipe/v2/search: Not Found");
-        (err as any).status = 404;
-        throw err;
+    it("searchRecipes propagates HTTP and GraphQL errors instead of swallowing them", async () => {
+      globalThis.fetch = async () => {
+        return new Response("Not Found", { status: 404 });
       };
 
-      const results = await client.searchRecipes("nonexistent_recipe");
-      assert.deepStrictEqual(results, []);
+      await assert.rejects(
+        () => client.searchRecipes("soep"),
+        (err: Error) => {
+          assert.ok(err.message.includes("(404)"));
+          assert.ok(err.message.includes("/graphql"));
+          return true;
+        }
+      );
+
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({ errors: [{ message: "Validation failed" }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      await assert.rejects(
+        () => client.searchRecipes("soep"),
+        (err: Error) => {
+          assert.ok(err.message.includes("FetchRecipes"));
+          assert.ok(err.message.includes("Validation failed"));
+          return true;
+        }
+      );
     });
 
-    it("getRecipeDetails returns descriptive message on 404", async () => {
-      client.request = async () => {
-        const err = new Error("Albert Heijn API error (404) at /mobile-services/recipe/v2/999999: Not Found");
-        (err as any).status = 404;
-        throw err;
+    it("getRecipeDetails propagates HTTP errors and returns Not Found when recipe is null", async () => {
+      globalThis.fetch = async () => {
+        return new Response("Not Found", { status: 404 });
+      };
+
+      await assert.rejects(
+        () => client.getRecipeDetails("999999"),
+        (err: Error) => {
+          assert.ok(err.message.includes("(404)"));
+          assert.ok(err.message.includes("/graphql"));
+          return true;
+        }
+      );
+
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({
+            data: { recipe: null },
+            errors: [{ message: "Subgraph errors redacted", path: ["recipe"] }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
       };
 
       const details = await client.getRecipeDetails("999999");
       assert.strictEqual((details as any).error, "Not Found");
       assert.ok((details as any).message.includes("999999"));
+
+      await assert.rejects(
+        () => client.getRecipeDetails("not-a-number"),
+        /Invalid recipe ID/
+      );
     });
   });
 
@@ -541,6 +582,125 @@ describe("client.ts - AhClient", () => {
       assert.equal(profile.bonusCardNumber, "2620123456789");
       assert.equal(profile.hasBonusCard, true);
       assert.equal(profile.memberId, "mem_1001");
+    });
+
+    it("searchRecipes queries FetchRecipes via GraphQL and maps recipe summaries", async () => {
+      let capturedBody: any;
+      globalThis.fetch = async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify({
+            data: {
+              recipeSearchV2: {
+                page: { total: 1, hasNextPage: false },
+                result: [
+                  {
+                    id: 1194170,
+                    title: "Tortellini-soep",
+                    slug: "tortellini-soep",
+                    time: { cook: 35, oven: null, wait: null },
+                    serving: { number: 4 },
+                    images: [
+                      { width: 445, height: 297, url: "https://static.ah.nl/small.jpg" },
+                      { width: 890, height: 594, url: "https://static.ah.nl/large.jpg" },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const recipes = await client.searchRecipes("soep", 2, 5);
+      assert.equal(capturedBody.operationName, "FetchRecipes");
+      assert.deepStrictEqual(capturedBody.variables, {
+        searchText: "soep",
+        start: 10,
+        size: 5,
+        sortBy: "MOST_RELEVANT",
+        filters: [],
+        priorityRecipeIds: [],
+        boostFavoriteRecipeIds: [],
+        recipeIds: [],
+        ingredients: [],
+      });
+      assert.equal(recipes.length, 1);
+      assert.deepStrictEqual(recipes[0], {
+        id: 1194170,
+        title: "Tortellini-soep",
+        servings: 4,
+        prepTimeMinutes: 35,
+        ovenTimeMinutes: undefined,
+        waitTimeMinutes: undefined,
+        imageUrl: "https://static.ah.nl/large.jpg",
+        url: "https://www.ah.nl/allerhande/recept/R-R1194170/tortellini-soep",
+        ingredients: [],
+      });
+    });
+
+    it("getRecipeDetails queries FetchRecipeDetails via GraphQL and maps ingredients and steps", async () => {
+      let capturedBody: any;
+      globalThis.fetch = async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify({
+            data: {
+              recipe: {
+                id: 1194170,
+                title: "Tortellini-soep",
+                href: "/allerhande/recept/R-R1194170/tortellini-soep",
+                cookTime: 35,
+                ovenTime: 10,
+                waitTime: null,
+                servings: { number: 4 },
+                images: [
+                  { width: 445, height: 297, url: "https://static.ah.nl/small.jpg" },
+                  { width: 2048, height: 1496, url: "https://static.ah.nl/xl.jpg" },
+                ],
+                ingredients: [
+                  {
+                    id: 1251911,
+                    name: { singular: "middelgrote ui", plural: "middelgrote uien" },
+                    quantity: 2,
+                    quantityUnit: { singular: "", plural: null },
+                    text: "2 middelgrote uien",
+                  },
+                  {
+                    id: 399,
+                    name: { singular: "knoflook", plural: "knoflook" },
+                    quantity: 1,
+                    quantityUnit: { singular: "teen", plural: "tenen" },
+                    text: "1 teen knoflook",
+                  },
+                ],
+                preparation: {
+                  steps: ["Snipper de uien.", "Kook de soep."],
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const recipe = (await client.getRecipeDetails("R-R1194170")) as any;
+      assert.equal(capturedBody.operationName, "FetchRecipeDetails");
+      assert.deepStrictEqual(capturedBody.variables, { id: 1194170 });
+      assert.equal(recipe.id, 1194170);
+      assert.equal(recipe.title, "Tortellini-soep");
+      assert.equal(recipe.servings, 4);
+      assert.equal(recipe.prepTimeMinutes, 35);
+      assert.equal(recipe.ovenTimeMinutes, 10);
+      assert.equal(recipe.waitTimeMinutes, undefined);
+      assert.equal(recipe.imageUrl, "https://static.ah.nl/xl.jpg");
+      assert.equal(recipe.url, "https://www.ah.nl/allerhande/recept/R-R1194170/tortellini-soep");
+      assert.deepStrictEqual(recipe.instructions, ["Snipper de uien.", "Kook de soep."]);
+      assert.deepStrictEqual(recipe.ingredients, [
+        { name: "middelgrote uien", amount: 2, unit: undefined },
+        { name: "knoflook", amount: 1, unit: "teen" },
+      ]);
     });
 
     it("getShoppingList maps product items and free text items correctly", async () => {

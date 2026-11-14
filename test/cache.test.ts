@@ -199,6 +199,40 @@ describe("client.ts - response cache", () => {
         if (body.operationName === "FetchPosReceiptsDetails") {
           return json({ data: { posReceiptDetails: { total: { amount: 10 }, products: [] } } });
         }
+        if (body.operationName === "FetchRecipes") {
+          const term = body.variables?.searchText;
+          return json({
+            data: {
+              recipeSearchV2: {
+                page: { total: term === "empty" ? 0 : 1, hasNextPage: false },
+                result:
+                  term === "empty"
+                    ? []
+                    : [{ id: 1194170, title: "Tortellini-soep", slug: "tortellini-soep" }],
+              },
+            },
+          });
+        }
+        if (body.operationName === "FetchRecipeDetails") {
+          const id = body.variables?.id;
+          if (id === 999999) {
+            return json({
+              data: { recipe: null },
+              errors: [{ message: "Subgraph errors redacted", path: ["recipe"] }],
+            });
+          }
+          return json({
+            data: {
+              recipe: {
+                id,
+                title: "Tortellini-soep",
+                href: "/allerhande/recept/R-R1194170/tortellini-soep",
+                ingredients: [],
+                preparation: { steps: [] },
+              },
+            },
+          });
+        }
         return json({ data: {} });
       }
       return json({ ok: true });
@@ -305,6 +339,26 @@ describe("client.ts - response cache", () => {
     await client.getReceiptDetails("tx-1");
     await client.getReceiptDetails("tx-1");
     assert.equal(calls.length, 3, "receipt details are immutable and cached");
+  });
+
+  it("caches non-empty recipe searches and found recipe details, but never empty or missing ones", async () => {
+    const client = new AhClient("https://api.ah.nl");
+
+    await client.searchRecipes("soep", 0, 5);
+    await client.searchRecipes("soep", 0, 5);
+    assert.equal(calls.length, 1, "non-empty recipe search should be cached");
+
+    await client.searchRecipes("empty", 0, 5);
+    await client.searchRecipes("empty", 0, 5);
+    assert.equal(calls.length, 3, "empty recipe search must not be cached");
+
+    await client.getRecipeDetails(1194170);
+    await client.getRecipeDetails(1194170);
+    assert.equal(calls.length, 4, "found recipe details should be cached");
+
+    await client.getRecipeDetails(999999);
+    await client.getRecipeDetails(999999);
+    assert.equal(calls.length, 6, "missing recipe details must not be cached");
   });
 
   it("never caches shopping list reads", async () => {
