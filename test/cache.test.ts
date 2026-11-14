@@ -173,26 +173,46 @@ describe("client.ts - response cache", () => {
       const url = String(input);
       calls.push(url);
 
-      if (url.includes("/mobile-services/product/detail/v4/products/bulk")) {
-        return json([{ id: 196825, title: "Test Product" }]);
-      }
-      if (url.includes("/mobile-services/product/detail/v4/products/") && url.includes("/alternatives")) {
-        return json([{ id: 196826, title: "Alt Product" }]);
-      }
-      if (url.includes("/mobile-services/product/detail/v4/products/")) {
-        return json({ productCard: { id: 196825, title: "Test Product" } });
+      if (url.includes("/mobile-services/product/search/v2/products")) {
+        return json({ products: [{ webshopId: 196825, title: "Test Product" }] });
       }
       if (url.includes("/mobile-services/product/search/v2")) {
         return json({ products: [], page: { totalElements: 0 } });
       }
-      if (url.includes("/mobile-services/bonusbox/v1")) {
-        return json({ bonusBox: [] });
+      if (url.includes("/mobile-services/bonuspage/v3/metadata")) {
+        return json({ periods: [{ bonusStartDate: "2026-11-09", bonusEndDate: "2026-11-15" }] });
+      }
+      if (url.includes("/mobile-services/bonuspage/v1/personal")) {
+        return json({ bonusGroupOrProducts: [] });
       }
       if (url.includes("/mobile-services/shoppinglist/v2")) {
         return json({ id: "list-1", items: [] });
       }
       if (url.includes("/graphql")) {
         const body = JSON.parse(String(init?.body ?? "{}"));
+        if (body.operationName === "FetchProductDetails") {
+          return json({
+            data: {
+              product: {
+                id: body.variables?.productId ?? 196825,
+                title: "Test Product",
+                priceV2: { now: { amount: 1.99 } },
+              },
+            },
+          });
+        }
+        if (body.operationName === "FetchProductAlternatives") {
+          return json({
+            data: {
+              productAlternatives: {
+                products: [{ id: 196826, title: "Alt Product", priceV2: { now: { amount: 1.49 } } }],
+              },
+            },
+          });
+        }
+        if (body.operationName === "BargainItems") {
+          return json({ data: { bargainItems: [{ product: { id: "1" } }] } });
+        }
         if (body.operationName === "FetchPosReceiptsPage") {
           return json({ data: { posReceiptsPage: { pagination: { totalElements: 0 }, posReceipts: [] } } });
         }
@@ -312,17 +332,17 @@ describe("client.ts - response cache", () => {
     await client.request("/graphql", {
       method: "POST",
       body: {
-        query: "query GetBargainItems($storeId: Int!) { store { id } }",
-        operationName: "GetBargainItems",
-        variables: { storeId: 1 },
+        query: "query BargainItems($storeId: String!) { bargainItems(storeId: $storeId) { product { id } } }",
+        operationName: "BargainItems",
+        variables: { storeId: "1" },
       },
     });
     await client.request("/graphql", {
       method: "POST",
       body: {
-        query: "query GetBargainItems($storeId: Int!) { store { id name } }",
-        operationName: "GetBargainItems",
-        variables: { storeId: 1 },
+        query: "query BargainItems($storeId: String!) { bargainItems(storeId: $storeId) { product { id title } } }",
+        operationName: "BargainItems",
+        variables: { storeId: "1" },
       },
     });
 
@@ -412,12 +432,12 @@ describe("client.ts - response cache", () => {
 
     await client.getPersonalBonus();
     await client.getPersonalBonus();
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
 
     await client.activatePersonalBonus("1234567890123", [1, 2]);
     await client.getPersonalBonus();
 
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
   });
 
   it("coalesces parallel identical calls into one upstream request", async () => {
@@ -463,7 +483,11 @@ describe("client.ts - response cache", () => {
 
   it("does not cache an unknown store's clearance list", async () => {
     const client = new AhClient("https://api.ah.nl");
-    globalThis.fetch = async () => json({ data: { store: null } });
+    globalThis.fetch = async () =>
+      json({
+        data: null,
+        errors: [{ message: "Store not found", path: ["bargainItems"] }],
+      });
 
     await client.getClearanceBargains(4242);
     await client.getClearanceBargains(4242);

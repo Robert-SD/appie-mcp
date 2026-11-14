@@ -97,6 +97,13 @@ export class AhClient {
     const method = (options.method || "GET").toUpperCase();
 
     if (method !== "GET") {
+      if (endpoint === "/mobile-services/v2/recommendations/dontforgetlane") {
+        return {
+          ttl: CACHE_TTL.offers,
+          shouldCache: (payload: any) =>
+            Array.isArray(payload?.productCards) && payload.productCards.length > 0,
+        };
+      }
       if (endpoint !== "/graphql") return null;
       const operationName = options.body?.operationName;
       if (operationName === "FetchPosReceiptsDetails") {
@@ -105,12 +112,63 @@ export class AhClient {
           shouldCache: (payload: any) => Boolean(payload?.data?.posReceiptDetails),
         };
       }
-      if (operationName === "GetBargainItems") {
+      if (operationName === "BargainItems") {
         return {
           ttl: CACHE_TTL.offers,
-          // An unknown store answers with a null store; that must stay
-          // retryable instead of being replayed as "no bargains".
-          shouldCache: (payload: any) => Boolean(payload?.data?.store),
+          // Missing/empty store clearance answers with null or errors; keep retryable.
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.bargainItems) &&
+            payload.data.bargainItems.length > 0,
+        };
+      }
+      if (operationName === "FetchProductDetails") {
+        return {
+          ttl: CACHE_TTL.productDetail,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length && Boolean(payload?.data?.product?.id),
+        };
+      }
+      if (operationName === "FetchProductAlternatives") {
+        return {
+          ttl: CACHE_TTL.productDetail,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.productAlternatives?.products),
+        };
+      }
+      if (operationName === "FetchCategories") {
+        return {
+          ttl: CACHE_TTL.catalog,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.productTopLevelTaxonomies) &&
+            payload.data.productTopLevelTaxonomies.length > 0,
+        };
+      }
+      if (operationName === "FetchSubCategories") {
+        return {
+          ttl: CACHE_TTL.catalog,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.productTaxonomyById) &&
+            payload.data.productTaxonomyById.length > 0,
+        };
+      }
+      if (operationName === "StoresSearch") {
+        return {
+          ttl: CACHE_TTL.catalog,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.storesSearch?.result),
+        };
+      }
+      if (operationName === "FetchBonusPromotionWithProducts") {
+        return {
+          ttl: CACHE_TTL.offers,
+          shouldCache: (payload: any) =>
+            !payload?.errors?.length &&
+            Array.isArray(payload?.data?.bonusPromotions),
         };
       }
       if (operationName === "FetchRecipes") {
@@ -129,8 +187,8 @@ export class AhClient {
             !payload?.errors?.length && Boolean(payload?.data?.recipe?.id),
         };
       }
-      // FetchMember (profile) and FetchPosReceiptsPage (receipt overview) are
-      // live-only: they carry personal data or a list that changes.
+      // FetchMember, FetchPosReceiptsPage, FetchMyListBasket, FetchFavoriteLists
+      // carry personal or mutable user state and stay live-only.
       return null;
     }
 
@@ -139,28 +197,19 @@ export class AhClient {
     if (endpoint.startsWith("/mobile-services/product/search/v2/suggestions")) {
       return { ttl: CACHE_TTL.search };
     }
-    if (endpoint.startsWith("/mobile-services/product/search/v2")) {
-      return { ttl: CACHE_TTL.search };
-    }
-    if (endpoint.startsWith("/mobile-services/product/detail/v4/products")) {
+    if (endpoint.startsWith("/mobile-services/product/search/v2/products")) {
       return {
         ttl: CACHE_TTL.productDetail,
         shouldCache: AhClient.isCacheableProductPayload,
       };
     }
-    if (endpoint.startsWith("/mobile-services/v1/product-shelves/categories")) {
-      return { ttl: CACHE_TTL.catalog };
+    if (endpoint.startsWith("/mobile-services/product/search/v2")) {
+      return { ttl: CACHE_TTL.search };
     }
-    if (endpoint.startsWith("/mobile-services/store/v1/stores")) {
-      return { ttl: CACHE_TTL.catalog };
-    }
-    if (endpoint.startsWith("/mobile-services/bonus-group/v1/segments/")) {
+    if (endpoint.startsWith("/mobile-services/bonuspage/v3/metadata")) {
       return { ttl: CACHE_TTL.offers };
     }
-    if (endpoint.startsWith("/mobile-services/bonusbox/v1")) {
-      return { ttl: CACHE_TTL.offers };
-    }
-    if (endpoint.startsWith("/favorieten/predictive-list")) {
+    if (endpoint.startsWith("/mobile-services/bonuspage/v1/personal")) {
       return { ttl: CACHE_TTL.offers };
     }
 
@@ -196,21 +245,24 @@ export class AhClient {
     if (method === "GET") {
       const query = Object.entries(options.query ?? {})
         .filter(([, v]) => v !== undefined && v !== null && v !== "")
-        .map(([k, v]) => [k, String(v)] as [string, string])
+        .map(([k, v]) => [k, Array.isArray(v) ? v.map(String) : String(v)] as [string, string | string[]])
         .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
       return cacheKey(`${method} ${endpoint}`, [host, scope, query]);
     }
 
     const body = options.body ?? {};
-    return cacheKey(`${method} ${endpoint}`, [
-      host,
-      scope,
-      body.operationName ?? "",
-      // The document text is part of the key: two documents can share an
-      // operation name and variables while requesting different fields.
-      typeof body.query === "string" ? body.query : "",
-      body.variables ?? {},
-    ]);
+    if (endpoint === "/graphql") {
+      return cacheKey(`${method} ${endpoint}`, [
+        host,
+        scope,
+        body.operationName ?? "",
+        // The document text is part of the key: two documents can share an
+        // operation name and variables while requesting different fields.
+        typeof body.query === "string" ? body.query : "",
+        body.variables ?? {},
+      ]);
+    }
+    return cacheKey(`${method} ${endpoint}`, [host, scope, body]);
   }
 
   async request<T = any>(
@@ -245,7 +297,13 @@ export class AhClient {
     if (options.query) {
       const sp = new URLSearchParams();
       for (const [k, v] of Object.entries(options.query)) {
-        if (v !== undefined && v !== null && v !== "") {
+        if (Array.isArray(v)) {
+          for (const item of v) {
+            if (item !== undefined && item !== null && item !== "") {
+              sp.append(k, String(item));
+            }
+          }
+        } else if (v !== undefined && v !== null && v !== "") {
           sp.set(k, String(v));
         }
       }
@@ -363,39 +421,170 @@ export class AhClient {
     };
   }
 
+  private async graphql<T = any>(
+    operationName: string,
+    query: string,
+    variables?: Record<string, any>
+  ): Promise<T> {
+    const resp = await this.request<any>("/graphql", {
+      method: "POST",
+      body: {
+        operationName,
+        ...(variables ? { variables } : {}),
+        query,
+      },
+    });
+    if (Array.isArray(resp?.errors) && resp.errors.length > 0) {
+      throw new Error(
+        `Albert Heijn GraphQL error at ${operationName}: ${AhClient.formatGraphQlErrors(resp.errors)}`
+      );
+    }
+    return resp as T;
+  }
+
   async getProduct(productId: string | number): Promise<AhProduct> {
-    const cleanId = String(productId).replace(/^wi/, "");
-    const data = await this.request<any>(`/mobile-services/product/detail/v4/products/${cleanId}`);
-    return this.mapProduct(data.productCard || data);
+    const numericId = Number(String(productId).trim().replace(/^wi/i, ""));
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new Error(`Invalid product ID: ${productId}`);
+    }
+
+    const resp = await this.graphql<any>(
+      "FetchProductDetails",
+      `query FetchProductDetails($productId: Int!) {
+        product(id: $productId) {
+          id
+          title
+          brand
+          category
+          summary
+          highlights
+          additionalInformation
+          icons
+          salesUnitSize
+          priceV2 {
+            now { amount }
+            was { amount }
+            unitInfo { description price { amount formattedV2 } }
+            discount { description promotionType }
+            promotionLabel { tiers { mechanism description } }
+          }
+          availability {
+            online { status }
+            isOrderable
+          }
+          imagePack {
+            large { url width height }
+            medium { url width height }
+            small { url width height }
+          }
+        }
+      }`,
+      { productId: numericId }
+    );
+
+    if (!resp?.data?.product) {
+      throw new Error(`Product not found for ID: ${productId}`);
+    }
+    return this.mapGraphqlProduct(resp.data.product);
   }
 
   async getProductAlternatives(productId: string | number): Promise<AhProduct[]> {
-    const cleanId = String(productId).replace(/^wi/, "");
-    const data = await this.request<any[]>(
-      `/mobile-services/product/detail/v4/products/${cleanId}/alternatives`
+    const numericId = Number(String(productId).trim().replace(/^wi/i, ""));
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new Error(`Invalid product ID: ${productId}`);
+    }
+
+    const resp = await this.graphql<any>(
+      "FetchProductAlternatives",
+      `query FetchProductAlternatives($productId: Int!, $size: PageSize!) {
+        productAlternatives(id: $productId, size: $size) {
+          products {
+            id
+            title
+            brand
+            category
+            summary
+            icons
+            salesUnitSize
+            priceV2 {
+              now { amount }
+              was { amount }
+              unitInfo { description price { amount formattedV2 } }
+              discount { description promotionType }
+              promotionLabel { tiers { mechanism description } }
+            }
+            availability {
+              online { status }
+              isOrderable
+            }
+            imagePack {
+              large { url width height }
+              medium { url width height }
+              small { url width height }
+            }
+          }
+        }
+      }`,
+      { productId: numericId, size: 10 }
     );
-    if (!Array.isArray(data)) return [];
-    return data.map((p: any) => this.mapProduct(p));
+
+    const rawList = resp?.data?.productAlternatives?.products;
+    if (!Array.isArray(rawList)) return [];
+    return rawList.map((p: any) => this.mapGraphqlProduct(p));
   }
 
   async getProductsBulk(productIds: Array<string | number>): Promise<AhProduct[]> {
-    const ids = productIds.map((id) => String(id).replace(/^wi/, "")).join(",");
+    const ids = productIds.map((id) => String(id).trim().replace(/^wi/i, "")).filter(Boolean);
+    if (ids.length === 0) return [];
+
     const data = await this.request<any>(
-      `/mobile-services/product/detail/v4/products/bulk`,
-      { query: { productIds: ids } }
+      "/mobile-services/product/search/v2/products",
+      { query: { ids, sortOn: "INPUT_PRODUCT_IDS" } }
     );
-    const rawList = Array.isArray(data) ? data : data.products || [];
+    const rawList = Array.isArray(data) ? data : data?.products || [];
     return rawList.map((p: any) => this.mapProduct(p));
   }
 
   async getCategories(): Promise<any[]> {
-    return await this.request<any[]>("/mobile-services/v1/product-shelves/categories");
+    const resp = await this.graphql<any>(
+      "FetchCategories",
+      `query FetchCategories {
+        productTopLevelTaxonomies {
+          id
+          name
+          slug
+          active
+          totalProductCount
+          topLevelImage
+        }
+      }`
+    );
+    return resp?.data?.productTopLevelTaxonomies || [];
   }
 
   async getSubCategories(categoryId: string | number): Promise<any[]> {
-    return await this.request<any[]>(
-      `/mobile-services/v1/product-shelves/categories/${categoryId}/sub-categories`
+    const numericId = Number(String(categoryId).trim());
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new Error(`Invalid category ID: ${categoryId}`);
+    }
+
+    const resp = await this.graphql<any>(
+      "FetchSubCategories",
+      `query FetchSubCategories($id: Int!) {
+        productTaxonomyById(id: $id) {
+          id
+          name
+          slug
+          active
+          totalProductCount
+          children
+        }
+      }`,
+      { id: numericId }
     );
+    const all = resp?.data?.productTaxonomyById;
+    if (!Array.isArray(all)) return [];
+    return all.filter((t: any) => Number(t?.id) !== numericId);
   }
 
   /**
@@ -411,63 +600,203 @@ export class AhClient {
     return res.products;
   }
 
+  private async getCurrentBonusPeriod(): Promise<{ startDate: string; endDate: string }> {
+    const data = await this.request<any>("/mobile-services/bonuspage/v3/metadata");
+    const period = data?.periods?.[0];
+    if (!period?.bonusStartDate || !period?.bonusEndDate) {
+      throw new Error("Could not determine current Albert Heijn bonus period");
+    }
+    return {
+      startDate: period.bonusStartDate,
+      endDate: period.bonusEndDate,
+    };
+  }
+
   async getBonusGroupProducts(segmentId: number | string): Promise<AhProduct[]> {
-    const data = await this.request<any>(
-      `/mobile-services/bonus-group/v1/segments/${segmentId}/products`
-    );
-    const rawProducts = data.products || (Array.isArray(data) ? data : []);
-    return rawProducts.map((p: any) => this.mapProduct(p));
-  }
-
-  async getPersonalBonus(): Promise<any[]> {
-    const data = await this.request<any>("/mobile-services/bonusbox/v1");
-    return data.bonusBox || data.offers || (Array.isArray(data) ? data : []);
-  }
-
-  async getClearanceBargains(storeId: number): Promise<any[]> {
-    const graphqlQuery = {
-      query: `query GetBargainItems($storeId: Int!) {
-        store(id: $storeId) {
+    const { startDate, endDate } = await this.getCurrentBonusPeriod();
+    const resp = await this.graphql<any>(
+      "FetchBonusPromotionWithProducts",
+      `query FetchBonusPromotionWithProducts(
+        $id: String
+        $periodStart: String
+        $periodEnd: String
+        $filterUnavailableProducts: Boolean
+        $forcePromotionVisibility: Boolean = true
+        $showAllPromotionSegments: Boolean = true
+      ) {
+        bonusPromotions(
+          input: {
+            id: $id
+            periodStart: $periodStart
+            periodEnd: $periodEnd
+            filterUnavailableProducts: $filterUnavailableProducts
+            forcePromotionVisibility: $forcePromotionVisibility
+            showAllPromotionSegments: $showAllPromotionSegments
+          }
+        ) {
           id
-          bargainItems {
-            productId
+          title
+          productCount
+          products {
+            id
             title
-            wasPrice
-            nowPrice
-            discountPercentage
-            expirationDate
-            stockStatus
+            brand
+            category
+            salesUnitSize
+            icons
+            availability { isOrderable online { status } }
+            priceV2(
+              periodStart: $periodStart
+              periodEnd: $periodEnd
+              filterUnavailableProducts: $filterUnavailableProducts
+              forcePromotionVisibility: true
+            ) {
+              now { amount }
+              was { amount }
+              promotionLabel {
+                tiers {
+                  mechanism
+                  description
+                }
+              }
+            }
+            imagePack {
+              large { url width height }
+              medium { url width height }
+              small { url width height }
+            }
           }
         }
       }`,
-      operationName: "GetBargainItems",
-      variables: { storeId },
-    };
+      {
+        id: String(segmentId),
+        periodStart: startDate,
+        periodEnd: endDate,
+        filterUnavailableProducts: true,
+        forcePromotionVisibility: true,
+        showAllPromotionSegments: true,
+      }
+    );
 
+    const rawProducts = resp?.data?.bonusPromotions?.[0]?.products;
+    if (!Array.isArray(rawProducts)) return [];
+    return rawProducts.map((p: any) => this.mapGraphqlProduct(p));
+  }
+
+  async getPersonalBonus(): Promise<any[]> {
+    const { startDate } = await this.getCurrentBonusPeriod();
+    const data = await this.request<any>("/mobile-services/bonuspage/v1/personal", {
+      query: { bonusStartDate: startDate },
+    });
+    const entries =
+      data?.bonusGroupOrProducts ||
+      data?.bonusBox ||
+      data?.offers ||
+      (Array.isArray(data) ? data : []);
+    return entries.map((entry: any) => {
+      if (entry?.product) return this.mapProduct(entry.product);
+      if (entry?.bonusGroup) return entry.bonusGroup;
+      return entry;
+    });
+  }
+
+  async getClearanceBargains(storeId: number): Promise<any[]> {
     const resp = await this.request<any>("/graphql", {
       method: "POST",
-      body: graphqlQuery,
+      body: {
+        operationName: "BargainItems",
+        variables: { storeId: String(storeId) },
+        query: `query BargainItems($storeId: String!) {
+          bargainItems(storeId: $storeId) {
+            product {
+              id
+              title
+              brand
+              salesUnitSize
+            }
+            categoryTitle
+            markdown {
+              markdownType
+              markdownExpirationDate
+              markdownPercentage
+            }
+            stock
+            bargainPrice {
+              priceWas
+              priceNow
+            }
+          }
+        }`,
+      },
     });
-    return resp.data?.store?.bargainItems || [];
+
+    if (Array.isArray(resp?.errors) && resp.errors.length > 0) {
+      const onlyBargainPath = resp.errors.every(
+        (e: any) => Array.isArray(e?.path) && e.path.length === 1 && e.path[0] === "bargainItems"
+      );
+      if (onlyBargainPath && resp?.data == null) {
+        return [];
+      }
+      throw new Error(
+        `Albert Heijn GraphQL error at BargainItems: ${AhClient.formatGraphQlErrors(resp.errors)}`
+      );
+    }
+
+    const items = resp?.data?.bargainItems;
+    if (!Array.isArray(items)) return [];
+    return items.map((item: any) => ({
+      productId: item.product?.id,
+      title: item.product?.title,
+      brand: item.product?.brand,
+      unitSize: item.product?.salesUnitSize,
+      category: item.categoryTitle,
+      wasPrice: item.bargainPrice?.priceWas,
+      nowPrice: item.bargainPrice?.priceNow,
+      discountPercentage: item.markdown?.markdownPercentage,
+      markdownType: item.markdown?.markdownType,
+      expirationDate: item.markdown?.markdownExpirationDate,
+      stock: item.stock,
+    }));
   }
 
   /**
    * 4. Shopping Lists (Main & Favorites)
    */
+  private mapShoppingListItems(rawItems: any[]): ShoppingListItem[] {
+    return rawItems.map((item: any) => {
+      const rawProd = item.productDetails?.product || item.product;
+      const product = rawProd ? this.mapProduct(rawProd) : undefined;
+      const productId = item.productId || rawProd?.webshopId || rawProd?.id;
+      const isProduct =
+        item.originCode === "PRD" || item.type === "PRODUCT" || Boolean(productId);
+      const text =
+        item.text ||
+        item.description ||
+        item.vagueTermDetails?.searchTermValue ||
+        rawProd?.title;
+      const rawId =
+        item.id ||
+        (typeof item.listItemId === "number" && item.listItemId > 0
+          ? String(item.listItemId)
+          : undefined) ||
+        (productId ? `prd:${productId}` : text ? `txt:${text}` : undefined);
+
+      return {
+        id: rawId,
+        type: isProduct ? "PRODUCT" : "FREE_TEXT",
+        text,
+        productId,
+        product,
+        quantity: item.quantity ?? 1,
+        checked: Boolean(item.strikedthrough ?? item.checked),
+      };
+    });
+  }
+
   async getShoppingList(): Promise<ShoppingList> {
     try {
-      const data = await this.request<any>("/mobile-services/shoppinglist/v2");
-      const rawItems = data.items || [];
-      const items: ShoppingListItem[] = rawItems.map((item: any) => ({
-        id: item.id || item.listItemId,
-        type: item.type || (item.product ? "PRODUCT" : "FREE_TEXT"),
-        text: item.text || item.product?.title,
-        productId: item.productId || item.product?.id,
-        product: item.product ? this.mapProduct(item.product) : undefined,
-        quantity: item.quantity || 1,
-        checked: Boolean(item.checked),
-      }));
-
+      const data = await this.request<any>("/mobile-services/shoppinglist/v2/items");
+      const items = this.mapShoppingListItems(data.items || []);
       return {
         id: data.id,
         items,
@@ -482,16 +811,7 @@ export class AhClient {
               `https://api.ah.nl/handscanner/v1/lists?bonusCardNumber=${profile.bonusCardNumber}`
             );
             const list = (data.lists || [])[0] || {};
-            const rawItems = list.items || [];
-            const items: ShoppingListItem[] = rawItems.map((item: any) => ({
-              id: item.id || item.listItemId,
-              type: item.type || (item.product ? "PRODUCT" : "FREE_TEXT"),
-              text: item.text || item.product?.title,
-              productId: item.productId || item.product?.id,
-              product: item.product ? this.mapProduct(item.product) : undefined,
-              quantity: item.quantity || 1,
-              checked: Boolean(item.checked),
-            }));
+            const items = this.mapShoppingListItems(list.items || []);
             return {
               id: list.id,
               items,
@@ -510,15 +830,24 @@ export class AhClient {
     items: Array<{ type?: "FREE_TEXT" | "PRODUCT"; text?: string; productId?: number; quantity?: number }>
   ): Promise<any> {
     const payload = {
-      items: items.map((i) => ({
-        type: i.type || (i.productId ? "PRODUCT" : "FREE_TEXT"),
-        text: i.text,
-        productId: i.productId,
-        quantity: i.quantity || 1,
-      })),
+      items: items.map((i) => {
+        const isProduct = Boolean(i.productId) || i.type === "PRODUCT";
+        const cleanProductId =
+          i.productId !== undefined
+            ? Number(String(i.productId).replace(/^wi/i, ""))
+            : undefined;
+        return {
+          type: "SHOPPABLE",
+          originCode: isProduct ? "PRD" : "TXT",
+          ...(i.text ? { description: i.text, searchTerm: i.text } : {}),
+          ...(cleanProductId !== undefined ? { productId: cleanProductId } : {}),
+          quantity: i.quantity || 1,
+          strikeThrough: false,
+        };
+      }),
     };
     const res = await this.request<any>("/mobile-services/shoppinglist/v2/items", {
-      method: "POST",
+      method: "PATCH",
       body: payload,
     });
     this.cache.invalidate("GET /mobile-services/shoppinglist");
@@ -526,20 +855,73 @@ export class AhClient {
   }
 
   async removeShoppingListItem(itemId: string | number): Promise<any> {
-    const res = await this.request<any>(`/mobile-services/shoppinglist/v2/items/${itemId}`, {
-      method: "DELETE",
+    const needle = String(itemId).trim();
+    const list = await this.getShoppingList();
+    const match = list.items.find(
+      (i) =>
+        String(i.id) === needle ||
+        (i.productId !== undefined &&
+          (String(i.productId) === needle || `prd:${i.productId}` === needle)) ||
+        (i.text !== undefined && (i.text === needle || `txt:${i.text}` === needle))
+    );
+
+    if (!match) {
+      throw new Error(`Shopping list item not found: ${itemId}`);
+    }
+
+    const removalItem =
+      match.type === "PRODUCT" && match.productId !== undefined
+        ? {
+            listItemId: 0,
+            type: "SHOPPABLE",
+            originCode: "PRD",
+            productId: match.productId,
+            quantity: 0,
+            strikeThrough: false,
+          }
+        : {
+            listItemId: 0,
+            type: "SHOPPABLE",
+            originCode: "TXT",
+            description: match.text || "",
+            searchTerm: match.text || "",
+            quantity: 0,
+            strikeThrough: false,
+          };
+
+    const res = await this.request<any>("/mobile-services/shoppinglist/v2/items", {
+      method: "PATCH",
+      body: { items: [removalItem] },
     });
     this.cache.invalidate("GET /mobile-services/shoppinglist");
     return res;
   }
 
   async getFavoriteLists(): Promise<FavoriteList[]> {
-    const data = await this.request<any[]>("/mobile-services/lists/v3/lists");
+    const resp = await this.graphql<any>(
+      "FetchFavoriteLists",
+      `query FetchFavoriteLists($ids: [String!]!, $productIds: [Int!]!) {
+        favoriteListV2(ids: $ids, productIds: $productIds) {
+          id
+          description
+          totalSize
+          imageUrl
+          items {
+            id
+            productId
+            quantity
+          }
+        }
+      }`,
+      { ids: [], productIds: [] }
+    );
+
+    const data = resp?.data?.favoriteListV2;
     if (!Array.isArray(data)) return [];
     return data.map((l: any) => ({
       id: l.id,
-      title: l.title || l.name,
-      itemCount: l.itemCount || l.items?.length || 0,
+      title: l.description || l.title || l.name,
+      itemCount: l.totalSize ?? l.itemCount ?? l.items?.length ?? 0,
       items: l.items?.map((item: any) => ({
         id: item.id,
         type: "PRODUCT",
@@ -555,42 +937,61 @@ export class AhClient {
     listId: string,
     item: { productId: number; quantity?: number; originCode?: string }
   ): Promise<any> {
-    const res = await this.request<any>(`/mobile-services/lists/v3/lists/${listId}/items`, {
-      method: "POST",
-      body: {
-        originCode: item.originCode || "SEARCH",
-        productId: item.productId,
-        quantity: item.quantity || 1,
-      },
-    });
-    this.cache.invalidate("GET /mobile-services/lists/v3");
+    const resp = await this.graphql<any>(
+      "AddProductsToFavoriteList",
+      `mutation AddProductsToFavoriteList($favoriteListId: String!, $products: [FavoriteListProductMutation!]!) {
+        favoriteListProductsAddV2(id: $favoriteListId, products: $products) {
+          status
+          errorMessage
+        }
+      }`,
+      {
+        favoriteListId: String(listId).toUpperCase(),
+        products: [{ productId: item.productId, quantity: item.quantity || 1 }],
+      }
+    );
+
+    const res = resp?.data?.favoriteListProductsAddV2;
+    if (res?.status && res.status !== "SUCCESS") {
+      throw new Error(`Failed to add item to favorite list: ${res.errorMessage || res.status}`);
+    }
     return res;
   }
 
   async setFavoriteListItemChecked(
-    listId: string,
+    _listId: string,
     itemId: string,
     checked: boolean = true
   ): Promise<any> {
     const res = await this.request<any>(
-      `/mobile-services/lists/v3/lists/${listId}/items/${itemId}`,
+      `/mobile-services/lists/v3/lists/items/${itemId}`,
       {
         method: "PATCH",
         body: { checked },
       }
     );
-    this.cache.invalidate("GET /mobile-services/lists/v3");
     return res;
   }
 
   async removeFavoriteListItem(listId: string, itemId: string): Promise<any> {
-    const res = await this.request<any>(
-      `/mobile-services/lists/v3/lists/${listId}/items/${itemId}`,
+    const resp = await this.graphql<any>(
+      "DeleteProductsFromFavoriteList",
+      `mutation DeleteProductsFromFavoriteList($favoriteListId: String!, $itemIds: [String!]!) {
+        favoriteListProductsDeleteV2(id: $favoriteListId, itemIds: $itemIds) {
+          status
+          errorMessage
+        }
+      }`,
       {
-        method: "DELETE",
+        favoriteListId: String(listId).toUpperCase(),
+        itemIds: [itemId],
       }
     );
-    this.cache.invalidate("GET /mobile-services/lists/v3");
+
+    const res = resp?.data?.favoriteListProductsDeleteV2;
+    if (res?.status && res.status !== "SUCCESS") {
+      throw new Error(`Failed to remove item from favorite list: ${res.errorMessage || res.status}`);
+    }
     return res;
   }
 
@@ -1056,27 +1457,204 @@ export class AhClient {
    * 8. Store Locator
    */
   async searchStores(postalCodeOrCity?: string): Promise<StoreInfo[]> {
-    const data = await this.request<any[]>("/mobile-services/store/v1/stores", {
-      query: postalCodeOrCity ? { query: postalCodeOrCity } : undefined,
+    const trimmed = postalCodeOrCity?.trim();
+    const isPostalCode = trimmed ? /^\d{4}\s?[a-zA-Z]{2}$|^\d{4}$/.test(trimmed) : false;
+    const filter = isPostalCode && trimmed
+      ? { postalCode: trimmed.replace(/\s+/g, "").toUpperCase() }
+      : {};
+    const limit = isPostalCode ? 20 : 1500;
+
+    const resp = await this.graphql<{
+      data?: { storesSearch?: { result?: any[] } };
+    }>(
+      "StoresSearch",
+      `query StoresSearch($filter: StoresFilterInput, $limit: Int) {
+        storesSearch(filter: $filter, limit: $limit) {
+          pageInfo {
+            total
+            hasNextPage
+          }
+          result {
+            id
+            name
+            phone
+            storeType
+            address {
+              street
+              houseNumber
+              houseNumberExtra
+              postalCode
+              city
+            }
+            openingDays {
+              dayName
+              openingHour {
+                openFrom
+                openUntil
+              }
+            }
+            services {
+              code
+              description
+            }
+          }
+        }
+      }`,
+      { filter, limit }
+    );
+
+    let stores = resp?.data?.storesSearch?.result || [];
+    if (trimmed && !isPostalCode) {
+      const needle = trimmed.toLowerCase();
+      stores = stores.filter((s: any) =>
+        [s.name, s.address?.city, s.address?.street, s.address?.postalCode]
+          .filter(Boolean)
+          .some((field: string) => field.toLowerCase().includes(needle))
+      );
+    }
+
+    return stores.map((s: any) => {
+      const addr = s.address || {};
+      const house = [addr.houseNumber, addr.houseNumberExtra].filter(Boolean).join("");
+      const street = [addr.street, house].filter(Boolean).join(" ") || s.street;
+      return {
+        id: s.id,
+        name: s.name || street,
+        street,
+        postalCode: addr.postalCode || s.postalCode,
+        city: addr.city || s.city,
+        distanceKm: s.distance,
+        isOpenNow: this.isStoreOpenNow(s.openingDays) ?? s.isOpenNow,
+        facilities: Array.isArray(s.services)
+          ? s.services.map((svc: any) => svc.code || svc.description).filter(Boolean)
+          : s.facilities || [],
+      };
     });
-    if (!Array.isArray(data)) return [];
-    return data.map((s: any) => ({
-      id: s.id,
-      name: s.name || s.address?.street,
-      street: s.address?.street || s.street,
-      postalCode: s.address?.postalCode || s.postalCode,
-      city: s.address?.city || s.city,
-      distanceKm: s.distance,
-      isOpenNow: s.isOpenNow,
-      facilities: s.facilities || [],
-    }));
+  }
+
+  private isStoreOpenNow(openingDays: any): boolean | undefined {
+    if (!Array.isArray(openingDays) || openingDays.length === 0) return undefined;
+    const flatDays = Array.isArray(openingDays[0]) ? openingDays[0] : openingDays;
+    if (!Array.isArray(flatDays) || flatDays.length === 0) return undefined;
+
+    const now = new Date();
+    const enParts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Amsterdam",
+      weekday: "long",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const nlWeekday = new Intl.DateTimeFormat("nl-NL", {
+      timeZone: "Europe/Amsterdam",
+      weekday: "long",
+    })
+      .format(now)
+      .toUpperCase();
+    const enWeekday = enParts.find((p) => p.type === "weekday")?.value.toUpperCase() || "";
+    const hhmm = `${enParts.find((p) => p.type === "hour")?.value}:${enParts.find((p) => p.type === "minute")?.value}`;
+
+    const today = flatDays.find((d: any) => {
+      const name = String(d?.dayName || "").toUpperCase();
+      return name === enWeekday || name === nlWeekday;
+    });
+    const openFrom = today?.openingHour?.openFrom;
+    const openUntil = today?.openingHour?.openUntil;
+    if (!openFrom || !openUntil) return undefined;
+    return hhmm >= openFrom && hhmm < openUntil;
   }
 
   /**
    * 9. Active Online Cart
    */
   async getCart(): Promise<any> {
-    return await this.request<any>("/mobile-services/order/v1/cart");
+    const resp = await this.graphql<{ data?: { basket?: any; order?: any } }>(
+      "FetchMyListBasket",
+      `query FetchMyListBasket {
+        basket(input: null) {
+          canChangeDelivery
+          itemsInOrder {
+            position
+            originCode
+            isClosed
+            allocatedQuantity
+            quantity
+            product {
+              id
+              title
+              brand
+              salesUnitSize
+              category
+              priceV2 {
+                now { amount }
+                was { amount }
+              }
+            }
+          }
+          notes {
+            description
+            isStrikethrough
+            originCode
+            position
+            quantity
+            searchTerm
+          }
+          products {
+            isStrikethrough
+            originCode
+            position
+            quantity
+            product {
+              id
+              title
+              brand
+              salesUnitSize
+              category
+              priceV2 {
+                now { amount }
+                was { amount }
+              }
+            }
+          }
+          summary {
+            isCancellable
+            quantity
+            shoppingType
+            lastUserChangeDateTime
+            price {
+              discount { amount }
+              totalPrice { amount }
+              priceAfterDiscount { amount }
+              priceBeforeDiscount { amount }
+            }
+          }
+        }
+        order {
+          delivery {
+            address {
+              street
+              houseNumber
+              houseNumberExtra
+              zipCode
+              city
+              countryCode
+            }
+            date
+            endTime
+            startTime
+            status
+            id
+            shiftCode
+            pickupLocationId
+          }
+        }
+      }`,
+      {}
+    );
+    return {
+      basket: resp?.data?.basket || null,
+      order: resp?.data?.order || null,
+    };
   }
 
   /**
@@ -1091,8 +1669,21 @@ export class AhClient {
   }
 
   async getPredictiveFavorites(): Promise<any[]> {
-    const data = await this.request<any>("/favorieten/predictive-list");
-    return Array.isArray(data) ? data : data.items || [];
+    const data = await this.request<any>(
+      "/mobile-services/v2/recommendations/dontforgetlane",
+      {
+        method: "POST",
+        body: {
+          positiveCmOnly: true,
+          offset: 0,
+          usecaseId: "app_mylist",
+          basketItems: [],
+          limit: 20,
+        },
+      }
+    );
+    const cards = Array.isArray(data) ? data : data.productCards || data.items || [];
+    return cards.map((p: any) => this.mapProduct(p));
   }
 
   async activatePersonalBonus(bonusCardNumber: string, selectedBonusIds: number[]): Promise<any> {
@@ -1103,9 +1694,49 @@ export class AhClient {
         selectedBonusIds,
       },
     });
-    this.cache.invalidate("GET /mobile-services/bonusbox");
-    this.cache.invalidate("GET /favorieten/predictive-list");
+    this.cache.invalidate("GET /mobile-services/bonuspage/v1/personal");
+    this.cache.invalidate("POST /mobile-services/v2/recommendations/dontforgetlane");
     return res;
+  }
+
+  private mapGraphqlProduct(p: any): AhProduct {
+    const now = p.priceV2?.now?.amount;
+    const was = p.priceV2?.was?.amount;
+    const isDiscounted =
+      now !== null &&
+      now !== undefined &&
+      was !== null &&
+      was !== undefined &&
+      was > now;
+    const tier = p.priceV2?.promotionLabel?.tiers?.[0];
+    const bonusMechanism =
+      p.priceV2?.discount?.description || tier?.mechanism || tier?.description;
+
+    return {
+      id: Number(p.id) || p.id,
+      webProductId: p.id !== undefined && p.id !== null ? `wi${p.id}` : undefined,
+      title: p.title || "",
+      summary: p.summary || p.highlights || p.additionalInformation,
+      brand: p.brand,
+      price: {
+        now: (isDiscounted ? now : (now ?? was)) ?? 0,
+        was: isDiscounted ? was : undefined,
+        unitSizeDescription: p.salesUnitSize || p.priceV2?.unitInfo?.description,
+      },
+      unitPriceDescription: p.priceV2?.unitInfo?.price?.formattedV2,
+      bonus: Boolean(isDiscounted || bonusMechanism || p.priceV2?.discount),
+      bonusMechanism,
+      discountType: p.priceV2?.discount?.promotionType,
+      images: Array.isArray(p.imagePack)
+        ? p.imagePack
+            .map((img: any) => ({ url: img.large || img.medium || img.small }))
+            .filter((img: any) => Boolean(img.url))
+        : [],
+      category: p.category,
+      availableOnline:
+        p.availability?.isOrderable ??
+        (p.availability?.online?.status === "ORDERABLE" ? true : undefined),
+    };
   }
 
   mapProduct(raw: any): AhProduct {

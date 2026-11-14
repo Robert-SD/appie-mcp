@@ -35,4 +35,91 @@ describe("live smoke tests (api.ah.nl)", () => {
       message: "Recipe not found for ID: 999999999",
     });
   });
+
+  it("catalog endpoints (search, getProduct, alternatives, bulk, categories, subCategories, suggestions) work live", async () => {
+    const client = new AhClient();
+
+    const search = await client.searchProducts({ query: "halfvolle melk", size: 3 });
+    assert.ok(search.products.length > 0, "expected live search results");
+
+    const firstId = search.products[0].id;
+    const product = await client.getProduct(firstId);
+    assert.equal(Number(product.id), Number(firstId));
+    assert.ok(product.title.length > 0);
+
+    const bulk = await client.getProductsBulk([firstId]);
+    assert.ok(bulk.length >= 1, "expected bulk lookup to return at least 1 product");
+
+    const alts = await client.getProductAlternatives(firstId);
+    assert.ok(Array.isArray(alts));
+
+    const categories = await client.getCategories();
+    assert.ok(categories.length > 0, "expected top-level categories");
+
+    const subs = await client.getSubCategories(categories[0].id);
+    assert.ok(Array.isArray(subs) && subs.length > 0, "expected sub-categories");
+
+    const suggestions = await client.getSearchSuggestions("melk", 5);
+    assert.ok(suggestions.length > 0, "expected search suggestions");
+  });
+
+  it("storesSearch, clearance bargains, predictive favorites, cart, and bonus offers work live", async () => {
+    const client = new AhClient();
+
+    const amsterdamStores = await client.searchStores("Amsterdam");
+    assert.ok(amsterdamStores.length > 0, "expected live stores for Amsterdam");
+    assert.ok(amsterdamStores[0].id);
+
+    const postalStores = await client.searchStores("1011");
+    assert.ok(postalStores.length > 0, "expected live stores for postal code 1011");
+
+    const bargains = await client.getClearanceBargains(Number(amsterdamStores[0].id));
+    assert.ok(Array.isArray(bargains));
+
+    const bonusOffers = await client.getBonusOffers("", 0, 5);
+    assert.ok(bonusOffers.length > 0, "expected live bonus offers");
+
+    const predictive = await client.getPredictiveFavorites();
+    assert.ok(Array.isArray(predictive));
+
+    const cart = await client.getCart();
+    assert.ok(cart && typeof cart === "object" && "basket" in cart);
+  });
+
+  it("shopping list supports adding, reading, and removing items live in an anonymous session", async () => {
+    const client = new AhClient();
+
+    const search = await client.searchProducts({ query: "melk", size: 1 });
+    assert.ok(search.products.length > 0);
+    const productId = Number(search.products[0].id);
+    const marker = `appie-mcp-smoke-${Date.now()}`;
+
+    await client.addShoppingListItems([
+      { type: "FREE_TEXT", text: marker, quantity: 1 },
+      { type: "PRODUCT", productId, quantity: 1 },
+    ]);
+
+    const afterAdd = await client.getShoppingList();
+    assert.ok(
+      afterAdd.items.some((i) => i.type === "FREE_TEXT" && i.text === marker),
+      "expected added free-text item in shopping list"
+    );
+    assert.ok(
+      afterAdd.items.some((i) => i.type === "PRODUCT" && Number(i.productId) === productId),
+      "expected added product item in shopping list"
+    );
+
+    await client.removeShoppingListItem(`txt:${marker}`);
+    await client.removeShoppingListItem(`prd:${productId}`);
+
+    const afterRemove = await client.getShoppingList();
+    assert.ok(
+      !afterRemove.items.some((i) => i.type === "FREE_TEXT" && i.text === marker),
+      "expected free-text item to be removed"
+    );
+    assert.ok(
+      !afterRemove.items.some((i) => i.type === "PRODUCT" && Number(i.productId) === productId),
+      "expected product item to be removed"
+    );
+  });
 });
