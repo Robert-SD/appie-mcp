@@ -124,3 +124,48 @@ export interface StoreInfo {
   openingHours?: Record<string, string>;
   facilities?: string[];
 }
+
+export interface Category {
+  id: number | string;
+  name: string;
+  slug?: string;
+  active?: boolean;
+  totalProductCount?: number;
+  topLevelImage?: any;
+  children?: any;
+}
+
+export interface ClearanceBargain {
+  productId?: string | number;
+  title?: string;
+  brand?: string;
+  unitSize?: string;
+  category?: string;
+  wasPrice?: number;
+  nowPrice?: number;
+  discountPercentage?: number;
+  markdownType?: string;
+  expirationDate?: string;
+  stock?: number;
+}
+
+export interface PromoDigestOffer {
+  frequentItem: string;
+  purchasedTimes: number;
+  matchedProduct: string;
+  currentPrice: number;
+  regularPrice?: number;
+  discountType?: string;
+  bonusMechanism?: string;
+}
+
+export interface PromoDigestResult {
+  frequentProductsFound: number;
+  currentOffersFound: number;
+  offers: PromoDigestOffer[];
+}
+
+export interface CartSummary {
+  basket: any | null;
+  order: any | null;
+}
